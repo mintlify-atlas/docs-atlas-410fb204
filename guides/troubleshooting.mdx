@@ -1,0 +1,757 @@
+---
+title: Troubleshooting
+description: Solutions for common issues and error messages
+icon: wrench
+---
+
+This guide helps you diagnose and fix common issues with your Telegram support bot.
+
+## Message thread not found error
+
+This error occurs when the bot tries to send a message to a topic that no longer exists (closed or deleted).
+
+### How the bot handles it
+
+The bot automatically detects and recovers from this error:
+
+```python support_bot/topic_manager.py (lines 27-34)
+def _is_thread_missing(err: TelegramBadRequest) -> bool:
+    msg = (getattr(err, "message", None) or "").lower()
+    return (
+        "message thread not found" in msg
+        or "message thread is not found" in msg
+        or "thread not found" in msg
+        or ("topic" in msg and "closed" in msg)
+    )
+```
+
+When a thread is missing, the bot creates a new topic:
+
+```python support_bot/topic_manager.py (lines 138-170)
+except TelegramBadRequest as err:
+    if not _is_thread_missing(err):
+        try:
+            await bot.send_message(
+                chat_id=self._operator_group_id,
+                message_thread_id=topic.topic_id,
+                text=(
+                    "Failed to copy the user's message.\n"
+                    f"type={message.content_type}, message_id={message.message_id}\n"
+                    f"error={getattr(err, 'message', str(err))}"
+                ),
+            )
+        except Exception:
+            pass
+        return topic
+    await self._db.deactivate_conversation(message.from_user.id)
+    topic = await self.ensure_topic(bot, message.from_user)
+    reply_params = None
+    copy_result = await bot.copy_message(
+        chat_id=self._operator_group_id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        message_thread_id=topic.topic_id,
+        reply_parameters=reply_params,
+    )
+```
+
+### Manual recovery
+
+If you need to manually recover:
+
+<Steps>
+  <Step title="Check the database">
+    Find conversations with missing topics:
+    
+    ```bash
+    sqlite3 support_bot.sqlite3 "SELECT user_id, topic_id FROM conversations WHERE active = 1;"
+    ```
+  </Step>
+  
+  <Step title="Deactivate old conversation">
+    ```bash
+    sqlite3 support_bot.sqlite3 "UPDATE conversations SET active = 0 WHERE user_id = <USER_ID>;"
+    ```
+  </Step>
+  
+  <Step title="User sends new message">
+    When the user sends their next message, a new topic will be automatically created.
+  </Step>
+</Steps>
+
+<Note>
+The bot handles this automatically - manual intervention is rarely needed.
+</Note>
+
+## Bot can't create topics
+
+If the bot can't create topics in your operator group, it's usually a permissions issue.
+
+### Required permissions
+
+Your bot needs these permissions in the operator group:
+
+<CardGroup cols={2}>
+  <Card title="Manage Topics" icon="list">
+    Create, edit, and close topics
+  </Card>
+  
+  <Card title="Send Messages" icon="message">
+    Send messages in topics
+  </Card>
+  
+  <Card title="Read Messages" icon="eye">
+    Read operator responses
+  </Card>
+  
+  <Card title="Delete Messages" icon="trash">
+    Optional: Clean up bot messages
+  </Card>
+</CardGroup>
+
+### Fix permissions
+
+<Steps>
+  <Step title="Open group settings">
+    In Telegram, open your operator group and tap the group name.
+  </Step>
+  
+  <Step title="Find your bot">
+    Scroll to "Members" and find your bot in the list.
+  </Step>
+  
+  <Step title="Make bot an admin">
+    Tap on the bot and select "Promote to Admin".
+  </Step>
+  
+  <Step title="Grant permissions">
+    Enable these permissions:
+    - Manage Topics
+    - Send Messages
+    - Delete Messages (optional)
+  </Step>
+  
+  <Step title="Enable topics">
+    In group settings, ensure "Topics" are enabled.
+  </Step>
+</Steps>
+
+### Verify setup
+
+Test topic creation:
+
+```python
+# The bot creates topics here
+async def ensure_topic(self, bot: Bot, user: User) -> TopicRef:
+    lock = await self._lock_for(user.id)
+    async with lock:
+        existing = await self._db.get_active_conversation(user.id)
+        if existing:
+            return TopicRef(user_id=user.id, topic_id=existing.topic_id)
+
+        topic = await bot.create_forum_topic(
+            chat_id=self._operator_group_id,
+            name=_topic_name(user),
+        )
+        await self._db.set_conversation(user_id=user.id, topic_id=topic.message_thread_id, active=True)
+```
+
+From `support_bot/topic_manager.py` (lines 61-72).
+
+<Warning>
+The operator group MUST be a supergroup with topics enabled. Regular groups don't support topics.
+</Warning>
+
+## Blocked by user errors
+
+This error occurs when a user has blocked your bot or deleted their Telegram account.
+
+### How the bot handles it
+
+The operator handler catches this error and notifies operators:
+
+```python support_bot/handlers/operator.py (lines 48-52)
+except TelegramForbiddenError:
+    await message.reply(
+        "The user has blocked the bot or has not opened the chat with the bot."
+    )
+    return
+```
+
+### What operators see
+
+When an operator tries to reply, they'll see:
+
+> The user has blocked the bot or has not opened the chat with the bot.
+
+### Solutions
+
+<AccordionGroup>
+  <Accordion title="User needs to unblock the bot">
+    Ask the user to:
+    1. Search for your bot in Telegram
+    2. Tap "Unblock" if blocked
+    3. Send `/start` to reopen the conversation
+  </Accordion>
+  
+  <Accordion title="User hasn't started the bot">
+    Some users may send messages through group mentions or other means without starting a private chat. Ask them to:
+    1. Open a private chat with your bot
+    2. Send `/start`
+  </Accordion>
+  
+  <Accordion title="Track blocked users">
+    Add custom tracking:
+    
+    ```python
+    async def mark_user_blocked(db: Database, user_id: int) -> None:
+        # Add a custom field to track blocked status
+        await db.conn.execute(
+            "UPDATE users SET blocked = 1 WHERE user_id = ?",
+            (user_id,),
+        )
+        await db.conn.commit()
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Database locked errors
+
+SQLite database locks can occur with concurrent access.
+
+### How the bot prevents locks
+
+The bot uses several strategies:
+
+#### 1. WAL mode
+
+Write-Ahead Logging improves concurrency:
+
+```python support_bot/db.py (lines 29-33)
+async def connect(self) -> None:
+    self._conn = await aiosqlite.connect(self._path)
+    await self._conn.execute("PRAGMA journal_mode=WAL;")
+    await self._conn.execute("PRAGMA foreign_keys=ON;")
+    await self._conn.commit()
+```
+
+#### 2. Transaction lock
+
+A mutex prevents conflicting transactions:
+
+```python support_bot/db.py (lines 27, 48-57)
+self._tx_lock = asyncio.Lock()
+
+@asynccontextmanager
+async def transaction(self) -> Any:
+    async with self._tx_lock:
+        await self.conn.execute("BEGIN;")
+        try:
+            yield
+        except BaseException:
+            await self.conn.rollback()
+            raise
+        else:
+            await self.conn.commit()
+```
+
+#### 3. User-specific locks
+
+Topic creation uses per-user locks:
+
+```python support_bot/topic_manager.py (lines 50-59)
+self._locks: dict[int, asyncio.Lock] = {}
+self._locks_guard = asyncio.Lock()
+
+async def _lock_for(self, user_id: int) -> asyncio.Lock:
+    async with self._locks_guard:
+        lock = self._locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[user_id] = lock
+        return lock
+```
+
+### Troubleshooting database locks
+
+<Steps>
+  <Step title="Check for multiple instances">
+    Ensure only one bot instance is running:
+    
+    ```bash
+    # For systemd
+    sudo systemctl status telegram-support-bot
+    
+    # For Docker
+    docker ps | grep support-bot
+    
+    # Check processes
+    ps aux | grep support_bot
+    ```
+  </Step>
+  
+  <Step title="Check WAL files">
+    Verify WAL mode is enabled:
+    
+    ```bash
+    sqlite3 support_bot.sqlite3 "PRAGMA journal_mode;"
+    # Should output: wal
+    ```
+  </Step>
+  
+  <Step title="Clear WAL files">
+    If needed, checkpoint the WAL:
+    
+    ```bash
+    sqlite3 support_bot.sqlite3 "PRAGMA wal_checkpoint(TRUNCATE);"
+    ```
+  </Step>
+  
+  <Step title="Increase timeout">
+    If still seeing issues, increase the SQLite timeout:
+    
+    ```python
+    async def connect(self) -> None:
+        self._conn = await aiosqlite.connect(self._path, timeout=30.0)
+        await self._conn.execute("PRAGMA journal_mode=WAL;")
+        await self._conn.execute("PRAGMA foreign_keys=ON;")
+        await self._conn.commit()
+    ```
+  </Step>
+</Steps>
+
+## Topic creation race conditions
+
+Multiple messages from the same user arriving simultaneously could create duplicate topics.
+
+### How the bot prevents races
+
+User-specific locks ensure only one topic is created:
+
+```python support_bot/topic_manager.py (lines 61-66)
+async def ensure_topic(self, bot: Bot, user: User) -> TopicRef:
+    lock = await self._lock_for(user.id)
+    async with lock:
+        existing = await self._db.get_active_conversation(user.id)
+        if existing:
+            return TopicRef(user_id=user.id, topic_id=existing.topic_id)
+```
+
+The lock ensures:
+1. Only one `ensure_topic` call runs at a time per user
+2. Database is checked for existing conversation first
+3. New topic is only created if none exists
+
+### Verify lock behavior
+
+To test the locking:
+
+```python
+# Send multiple messages rapidly as the same user
+# Only one topic should be created
+import asyncio
+
+async def test_race_condition():
+    tasks = []
+    for _ in range(10):
+        task = topics.ensure_topic(bot, user)
+        tasks.append(task)
+    results = await asyncio.gather(*tasks)
+    
+    # All results should have the same topic_id
+    assert len(set(r.topic_id for r in results)) == 1
+```
+
+<Note>
+The locking mechanism is automatic - no configuration needed.
+</Note>
+
+## Getting your operator group ID
+
+You need the operator group ID for the `OPERATOR_GROUP_ID` environment variable.
+
+### Method 1: Using a bot command
+
+<Steps>
+  <Step title="Add to your bot">
+    Add this temporary handler:
+    
+    ```python
+    @router.message(F.text == "/getgroupid")
+    async def get_group_id(message: Message) -> None:
+        await message.reply(
+            f"Chat ID: <code>{message.chat.id}</code>\n"
+            f"Chat Type: {message.chat.type}"
+        )
+    ```
+  </Step>
+  
+  <Step title="Send command">
+    In your operator group, send `/getgroupid`
+  </Step>
+  
+  <Step title="Copy the ID">
+    The bot will reply with the chat ID (starts with `-100`).
+  </Step>
+  
+  <Step title="Remove handler">
+    Delete the temporary handler after getting your ID.
+  </Step>
+</Steps>
+
+### Method 2: Using @RawDataBot
+
+<Steps>
+  <Step title="Add RawDataBot">
+    Add [@RawDataBot](https://t.me/RawDataBot) to your operator group.
+  </Step>
+  
+  <Step title="Send any message">
+    Send any message in the group.
+  </Step>
+  
+  <Step title="Copy chat ID">
+    RawDataBot will reply with JSON data. Look for `"chat":{"id":-100...}`.
+  </Step>
+  
+  <Step title="Remove bot">
+    Remove @RawDataBot from your group.
+  </Step>
+</Steps>
+
+### Method 3: From bot logs
+
+If your bot is already running, check the logs when it tries to send a message:
+
+```bash
+sudo journalctl -u telegram-support-bot | grep "operator_group_id"
+```
+
+<Warning>
+The group ID must start with `-100`. Regular groups (starting with just `-`) don't support topics.
+</Warning>
+
+## Checking bot permissions
+
+Verify your bot has the correct permissions programmatically.
+
+### Get bot info
+
+The bot logs its info on startup:
+
+```python support_bot/main.py (lines 50-51)
+me = await bot.get_me()
+log.info("Started as @%s (id=%s)", me.username, me.id)
+```
+
+### Check admin status
+
+Add a debug command:
+
+```python
+@router.message(F.text == "/checkperms")
+async def check_permissions(message: Message, bot: Bot) -> None:
+    try:
+        admins = await bot.get_chat_administrators(message.chat.id)
+        bot_admin = next(
+            (admin for admin in admins if admin.user.is_bot and admin.user.id == (await bot.get_me()).id),
+            None
+        )
+        
+        if bot_admin:
+            perms = bot_admin.rights if hasattr(bot_admin, 'rights') else bot_admin
+            await message.reply(
+                f"Bot permissions:\n"
+                f"Can manage topics: {getattr(perms, 'can_manage_topics', False)}\n"
+                f"Can send messages: {getattr(perms, 'can_post_messages', False)}\n"
+                f"Can delete messages: {getattr(perms, 'can_delete_messages', False)}"
+            )
+        else:
+            await message.reply("Bot is not an admin in this chat.")
+    except Exception as e:
+        await message.reply(f"Error checking permissions: {e}")
+```
+
+## Failed message copy errors
+
+Sometimes messages can't be copied between chats.
+
+### Common causes
+
+<AccordionGroup>
+  <Accordion title="Protected content">
+    Some messages are protected and can't be copied. The bot handles this for text messages:
+    
+    ```python support_bot/topic_manager.py (lines 114-137)
+    except TelegramForbiddenError:
+        if message.content_type == "text" and _message_has_links(message):
+            try:
+                sent = await bot.send_message(
+                    chat_id=self._operator_group_id,
+                    message_thread_id=topic.topic_id,
+                    text=message.text or "",
+                    entities=message.entities,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    reply_parameters=reply_params,
+                )
+            except TelegramForbiddenError:
+                # Bot can't write to the group/topic — nothing else we can do here.
+                pass
+            except TelegramBadRequest:
+                pass
+        return topic
+    ```
+  </Accordion>
+  
+  <Accordion title="Invalid message content">
+    Some content types might not be supported. The bot logs these:
+    
+    ```python support_bot/topic_manager.py (lines 138-152)
+    except TelegramBadRequest as err:
+        if not _is_thread_missing(err):
+            try:
+                await bot.send_message(
+                    chat_id=self._operator_group_id,
+                    message_thread_id=topic.topic_id,
+                    text=(
+                        "Failed to copy the user's message.\n"
+                        f"type={message.content_type}, message_id={message.message_id}\n"
+                        f"error={getattr(err, 'message', str(err))}"
+                    ),
+                )
+            except Exception:
+                pass
+            return topic
+    ```
+  </Accordion>
+  
+  <Accordion title="File size limits">
+    Files larger than 20MB (photos) or 50MB (other files) can't be copied. Consider adding size checks:
+    
+    ```python
+    if message.photo:
+        file = await bot.get_file(message.photo[-1].file_id)
+        if file.file_size > 20 * 1024 * 1024:  # 20MB
+            await message.answer("File too large. Please send files under 20MB.")
+            return
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Operator messages not reaching users
+
+If operator replies aren't being delivered to users, check these issues.
+
+### Verify topic association
+
+The bot finds users by topic ID:
+
+```python support_bot/handlers/operator.py (lines 24-26)
+user_id = await db.find_user_id_by_topic(int(message.message_thread_id))
+if user_id is None:
+    return
+```
+
+From `support_bot/db.py`:
+
+```python support_bot/db.py (lines 193-200)
+async def find_user_id_by_topic(self, topic_id: int) -> int | None:
+    cur = await self.conn.execute(
+        "SELECT user_id FROM conversations WHERE topic_id = ? AND active = 1",
+        (topic_id,),
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    return int(row[0]) if row else None
+```
+
+### Debug steps
+
+<Steps>
+  <Step title="Check database">
+    Verify the conversation exists:
+    
+    ```bash
+    sqlite3 support_bot.sqlite3 "SELECT user_id, topic_id, active FROM conversations;"
+    ```
+  </Step>
+  
+  <Step title="Check topic ID">
+    Right-click the topic in Telegram and check the URL. The topic ID is the last number.
+  </Step>
+  
+  <Step title="Verify bot is responding">
+    Check that the bot is processing operator messages:
+    
+    ```bash
+    sudo journalctl -u telegram-support-bot -f
+    ```
+  </Step>
+  
+  <Step title="Check message handler">
+    Ensure the operator router is properly filtered:
+    
+    ```python support_bot/main.py (lines 47-48)
+    operator_router.message.filter(F.chat.id == config.operator_group_id)
+    dp.include_router(operator_router)
+    ```
+  </Step>
+</Steps>
+
+### Common mistakes
+
+<Warning>
+- Replying outside a topic (general chat) won't work
+- Replying in a closed/deleted topic won't work
+- Bot must be replying in the correct operator group
+- Topic must be associated with an active conversation
+</Warning>
+
+## Message links not working
+
+If reply chains aren't maintained between users and operators, check message link logging.
+
+### How message links work
+
+The bot creates bidirectional links:
+
+```python support_bot/topic_manager.py (lines 193-218)
+async def _log_message_link(
+    self,
+    *,
+    user_id: int,
+    source_chat_id: int,
+    source_message_id: int,
+    target_chat_id: int,
+    target_message_id: int,
+) -> None:
+    async with self._db.transaction():
+        await self._db.log_message_link(
+            user_id=user_id,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+            commit=False,
+        )
+        await self._db.log_message_link(
+            user_id=user_id,
+            source_chat_id=target_chat_id,
+            source_message_id=target_message_id,
+            target_chat_id=source_chat_id,
+            target_message_id=source_message_id,
+            commit=False,
+        )
+```
+
+### Verify links in database
+
+```bash
+sqlite3 support_bot.sqlite3 "SELECT * FROM message_links LIMIT 10;"
+```
+
+Expected output:
+```
+id|user_id|source_chat_id|source_message_id|target_chat_id|target_message_id|created_at
+1|123456|123456|1|-100123456|2|2024-01-01T00:00:00
+2|123456|-100123456|2|123456|1|2024-01-01T00:00:00
+```
+
+## Bot not starting
+
+If your bot won't start, check these common issues.
+
+### Check logs
+
+```bash
+# For systemd
+sudo journalctl -u telegram-support-bot -n 50
+
+# For Docker
+docker logs support-bot --tail 50
+```
+
+### Common startup errors
+
+<AccordionGroup>
+  <Accordion title="Invalid bot token">
+    Error: `Unauthorized` or `Invalid token`
+    
+    Solution:
+    1. Get a new token from [@BotFather](https://t.me/BotFather)
+    2. Update your `.env` file
+    3. Restart the bot
+  </Accordion>
+  
+  <Accordion title="Database connection failed">
+    Error: `unable to open database file`
+    
+    Solution:
+    1. Check the database path in `.env`
+    2. Ensure the directory exists
+    3. Check file permissions:
+       ```bash
+       chmod 600 support_bot.sqlite3
+       chown telegram-bot:telegram-bot support_bot.sqlite3
+       ```
+  </Accordion>
+  
+  <Accordion title="Import errors">
+    Error: `ModuleNotFoundError`
+    
+    Solution:
+    1. Activate your virtual environment
+    2. Install dependencies:
+       ```bash
+       pip install -r requirements.txt
+       ```
+  </Accordion>
+  
+  <Accordion title="Port already in use">
+    This shouldn't happen as the bot doesn't open any ports (uses long polling).
+    
+    If you see this error, check for other processes:
+    ```bash
+    ps aux | grep support_bot
+    kill <PID>  # Kill the old process
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Getting help
+
+If you're still experiencing issues:
+
+<CardGroup cols={2}>
+  <Card title="Check the code" icon="code">
+    Review the source code in:
+    - `support_bot/main.py`
+    - `support_bot/handlers/user.py`
+    - `support_bot/handlers/operator.py`
+    - `support_bot/topic_manager.py`
+    - `support_bot/db.py`
+  </Card>
+  
+  <Card title="Enable debug logging" icon="bug">
+    Set `LOG_LEVEL=DEBUG` in your `.env` file for detailed logs.
+  </Card>
+  
+  <Card title="Test manually" icon="flask">
+    Use the Python REPL to test database queries and bot methods interactively.
+  </Card>
+  
+  <Card title="Check Telegram status" icon="signal">
+    Visit [Telegram Status](https://telegram.org/status) to check for API issues.
+  </Card>
+</CardGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Deployment guide" icon="rocket" href="/guides/deployment">
+    Deploy your bot to production
+  </Card>
+  <Card title="Customization guide" icon="paintbrush" href="/guides/customization">
+    Customize your bot's behavior
+  </Card>
+</CardGroup>

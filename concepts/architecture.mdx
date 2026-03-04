@@ -1,0 +1,279 @@
+---
+title: System architecture
+description: Understand how the support bot components work together
+---
+
+The Telegram Support Bot is built on a modular, asynchronous architecture that handles real-time message routing between users and operators. This page explains the core components and how they interact.
+
+## Core components
+
+The bot consists of five main components that work together:
+
+### Bot
+
+The Bot component is the aiogram `Bot` instance that interfaces with Telegram's API. It's configured with HTML parse mode and handles all Telegram operations:
+
+```python support_bot/main.py
+bot = Bot(
+    token=config.bot_token,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+```
+
+The Bot is responsible for sending, copying, and forwarding messages between chats.
+
+### Dispatcher
+
+The Dispatcher manages the event routing system and middleware. It registers handlers for different message types and stores shared state:
+
+```python support_bot/main.py
+dp = Dispatcher()
+
+dp["db"] = db
+dp["topics"] = topics
+dp["log_messages"] = config.log_messages
+
+dp.include_router(user_router)
+
+operator_router.message.filter(F.chat.id == config.operator_group_id)
+dp.include_router(operator_router)
+```
+
+The Dispatcher uses dependency injection to provide the Database, TopicManager, and configuration to handlers.
+
+### Database
+
+The Database component manages SQLite connections and provides an async interface for storing user data, conversations, and message links:
+
+```python support_bot/db.py
+class Database:
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._conn: aiosqlite.Connection | None = None
+        self._tx_lock = asyncio.Lock()
+```
+
+It uses WAL mode for better concurrent access and maintains a transaction lock for safe writes. See [Database design](/concepts/database) for more details.
+
+### TopicManager
+
+The TopicManager handles forum topic creation, lifecycle management, and message routing between users and their dedicated topics:
+
+```python support_bot/topic_manager.py
+class TopicManager:
+    def __init__(self, db: Database, operator_group_id: int) -> None:
+        self._db = db
+        self._operator_group_id = operator_group_id
+        self._locks: dict[int, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+```
+
+It maintains per-user locks to prevent race conditions when creating topics concurrently. See [Topic management](/concepts/topic-management) for more details.
+
+### Handlers
+
+Handlers are organized into two routers:
+
+**User router** - Processes messages from users in private chats:
+
+```python support_bot/handlers/user.py
+router = Router(name="user")
+
+@router.message(CommandStart(), F.chat.type == "private")
+async def start(message: Message, bot: Bot, db: Database, topics: TopicManager) -> None:
+    await topics.copy_user_message_to_topic(bot, message)
+    await message.answer("Hello! How can I help you?")
+
+@router.message(F.chat.type == "private")
+async def any_private_message(message: Message, bot: Bot, db: Database, topics: TopicManager) -> None:
+    await topics.copy_user_message_to_topic(bot, message)
+```
+
+**Operator router** - Processes replies from operators in the forum group:
+
+```python support_bot/handlers/operator.py
+router = Router(name="operator")
+
+@router.message(F.is_topic_message.is_(True))
+async def topic_message_to_user(message: Message, bot: Bot, db: Database) -> None:
+    user_id = await db.find_user_id_by_topic(int(message.message_thread_id))
+    if user_id is None:
+        return
+    
+    await bot.copy_message(
+        chat_id=user_id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+    )
+```
+
+## Asynchronous architecture
+
+The bot is built on Python's `asyncio` framework, which enables efficient handling of concurrent I/O operations:
+
+```python support_bot/main.py
+async def _run() -> None:
+    db = Database(config.db_path)
+    await db.connect()
+    await db.init()
+    
+    bot = Bot(token=config.bot_token)
+    dp = Dispatcher()
+    
+    # Start polling
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+def main() -> None:
+    asyncio.run(_run())
+```
+
+### Why async matters
+
+The asynchronous design provides several benefits:
+
+- **Non-blocking I/O** - Database queries and API calls don't block other operations
+- **Concurrent message handling** - Multiple user messages can be processed simultaneously
+- **Resource efficiency** - A single Python process can handle many concurrent connections
+- **Responsive** - The bot remains responsive even under heavy load
+
+<Note>
+All Telegram API calls and database operations are async, so you must use `await` when calling them.
+</Note>
+
+## aiogram 3 framework
+
+The bot uses [aiogram 3](https://docs.aiogram.dev/), a modern async framework for Telegram bots:
+
+**Key features used:**
+
+- **Routers** - Organize handlers by functionality (user vs operator)
+- **Filters** - Use magic filters (`F.chat.type == "private"`) to match messages
+- **Dependency injection** - Pass shared state (db, topics) to handlers automatically
+- **Type safety** - Full type hints for better IDE support and fewer bugs
+
+```python support_bot/main.py
+dp.include_router(user_router)
+
+operator_router.message.filter(F.chat.id == config.operator_group_id)
+dp.include_router(operator_router)
+```
+
+## Data flow
+
+Here's how data flows through the system for common operations:
+
+### User sends message to bot
+
+1. User sends message in private chat
+2. Dispatcher routes to `any_private_message` handler in user router
+3. Handler calls `topics.copy_user_message_to_topic()`
+4. TopicManager ensures a topic exists for the user
+5. Bot copies message to operator group topic
+6. Database logs message link (source → target mapping)
+
+### Operator replies to user
+
+1. Operator sends message in forum topic
+2. Dispatcher routes to `topic_message_to_user` handler in operator router
+3. Handler looks up user_id from topic_id in database
+4. Bot copies message to user's private chat
+5. Database logs bidirectional message links
+6. If user blocked bot, operator receives error notification
+
+### Reply chain preservation
+
+1. User or operator replies to a specific message
+2. Handler queries database for linked message_id in target chat
+3. Bot uses `ReplyParameters` to maintain reply context
+4. Reply chain is preserved across both chats
+
+See [Message flow](/concepts/message-flow) for detailed examples.
+
+## Component interaction
+
+The components interact through well-defined interfaces:
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   Telegram API                       │
+└────────────┬────────────────────────────┬───────────┘
+             │                            │
+             ▼                            ▼
+      ┌───────────┐              ┌──────────────┐
+      │    Bot    │              │  Dispatcher  │
+      └─────┬─────┘              └──────┬───────┘
+            │                           │
+            │ ┌─────────────────────────┘
+            │ │
+            ▼ ▼
+      ┌────────────────┐         ┌──────────────┐
+      │ TopicManager   │◄────────┤   Handlers   │
+      └────────┬───────┘         └──────┬───────┘
+               │                        │
+               ▼                        ▼
+         ┌──────────┐            ┌──────────┐
+         │ Database │            │ Database │
+         └──────────┘            └──────────┘
+```
+
+**Key interactions:**
+
+- Handlers receive Bot, Database, and TopicManager via dependency injection
+- TopicManager uses Bot for Telegram operations and Database for state
+- Database is accessed directly by handlers for queries
+- All components are async and can operate concurrently
+
+<Warning>
+The TopicManager maintains per-user locks to prevent race conditions when creating topics. Never bypass the TopicManager to create topics directly.
+</Warning>
+
+## Configuration
+
+The bot is configured via environment variables:
+
+```python support_bot/config.py
+@dataclass(frozen=True)
+class Config:
+    bot_token: str
+    operator_group_id: int
+    db_path: str
+    log_level: str = "INFO"
+    log_messages: bool = True
+
+def load_config() -> Config:
+    bot_token = os.getenv("BOT_TOKEN")
+    operator_group_id = int(os.getenv("OPERATOR_GROUP_ID"))
+    db_path = os.getenv("DB_PATH", "./support_bot.sqlite3")
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    log_messages = os.getenv("LOG_MESSAGES", "1") != "0"
+```
+
+See [Environment variables](/api/configuration) for all options.
+
+## Lifecycle
+
+The bot follows a clean startup and shutdown sequence:
+
+```python support_bot/main.py
+async def _run() -> None:
+    db: Database | None = None
+    bot: Bot | None = None
+    try:
+        db = Database(config.db_path)
+        await db.connect()
+        await db.init()
+        
+        bot = Bot(token=config.bot_token)
+        dp = Dispatcher()
+        
+        me = await bot.get_me()
+        log.info("Started as @%s (id=%s)", me.username, me.id)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        if db is not None:
+            await db.close()
+        if bot is not None:
+            await bot.session.close()
+```
+
+This ensures database connections and bot sessions are properly closed even if errors occur.

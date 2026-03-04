@@ -1,0 +1,379 @@
+---
+title: Handlers
+description: Message handler routers for user and operator interactions
+---
+
+The bot uses Aiogram's Router system to organize message handlers. There are two main routers: one for user messages (private chats) and one for operator messages (forum topics).
+
+## Overview
+
+Handlers receive messages and process them based on filters. The Dispatcher passes shared dependencies to handlers:
+
+- `bot`: Aiogram Bot instance
+- `db`: Database instance
+- `topics`: TopicManager instance
+- `log_messages`: Boolean flag (from config)
+
+**File structure:**
+```
+support_bot/handlers/
+├── user.py       # User router: handles /start and private messages
+└── operator.py   # Operator router: handles topic messages to users
+```
+
+---
+
+## User Router
+
+Handles messages from users in private chats. Defined in `handlers/user.py`.
+
+```python
+router = Router(name="user")
+```
+
+### Handler: start
+
+```python
+@router.message(CommandStart(), F.chat.type == "private")
+async def start(
+    message: Message,
+    bot: Bot,
+    db: Database,
+    topics: TopicManager,
+    log_messages: bool = True
+) -> None
+```
+
+Handles the `/start` command from users.
+
+**Filters:**
+- `CommandStart()`: Matches `/start` command
+- `F.chat.type == "private"`: Only in private chats
+
+**Behavior:**
+1. Logs the user's message to the database
+2. Copies the message to the user's forum topic
+3. Sends a greeting: "Hello! How can I help you?"
+
+**Example flow:**
+```
+User sends: /start
+  → Bot logs message
+  → Bot creates/finds topic in operator group
+  → Bot copies /start to topic
+  → Bot replies: "Hello! How can I help you?"
+```
+
+**Parameters:**
+
+<ParamField path="message" type="Message" required>
+  The incoming message object from Aiogram
+</ParamField>
+
+<ParamField path="bot" type="Bot" required>
+  Bot instance injected by Dispatcher
+</ParamField>
+
+<ParamField path="db" type="Database" required>
+  Database instance injected by Dispatcher
+</ParamField>
+
+<ParamField path="topics" type="TopicManager" required>
+  TopicManager instance injected by Dispatcher
+</ParamField>
+
+<ParamField path="log_messages" type="bool" default="True">
+  Whether to log messages (injected from config)
+</ParamField>
+
+### Handler: any_private_message
+
+```python
+@router.message(F.chat.type == "private")
+async def any_private_message(
+    message: Message,
+    bot: Bot,
+    db: Database,
+    topics: TopicManager,
+    log_messages: bool = True
+) -> None
+```
+
+Handles all other messages from users in private chats (text, photos, documents, etc.).
+
+**Filters:**
+- `F.chat.type == "private"`: Only in private chats
+- Catches all messages not matched by higher-priority handlers
+
+**Behavior:**
+1. Logs the user's message to the database
+2. Copies the message to the user's forum topic
+3. Does not send a reply (operators will respond from the topic)
+
+**Example flow:**
+```
+User sends: "I need help with my order"
+  → Bot logs message
+  → Bot copies to operator topic
+  → Operators see message and can reply
+```
+
+**Parameters:** Same as `start` handler above.
+
+### Helper Function: _log_user_message
+
+```python
+async def _log_user_message(
+    db: Database,
+    message: Message,
+    *,
+    log_messages: bool
+) -> None
+```
+
+Internal helper that logs a user message to the database if logging is enabled.
+
+**Implementation:**
+```python
+if message.from_user is None:
+    return
+if not log_messages:
+    return
+
+await db.log_user_message(
+    user_id=message.from_user.id,
+    username=message.from_user.username,
+    first_name=message.from_user.first_name,
+    last_name=message.from_user.last_name,
+    direction="user",
+    chat_id=message.chat.id,
+    message_id=message.message_id,
+    content_type=message.content_type,
+    text=message.text,
+    caption=message.caption,
+    file_id=extract_file_id(message),
+    payload_json=safe_payload_json(message)
+)
+```
+
+---
+
+## Operator Router
+
+Handles messages from operators in the forum topics. Defined in `handlers/operator.py`.
+
+```python
+router = Router(name="operator")
+```
+
+### Handler: topic_message_to_user
+
+```python
+@router.message(F.is_topic_message.is_(True))
+async def topic_message_to_user(
+    message: Message,
+    bot: Bot,
+    db: Database,
+    log_messages: bool = True
+) -> None
+```
+
+Handles messages sent by operators in forum topics, copying them to the corresponding user.
+
+**Filters:**
+- `F.is_topic_message.is_(True)`: Only messages in forum topics
+- Ignores bot messages
+
+**Behavior:**
+1. Finds the user ID associated with the topic
+2. Builds reply parameters if the operator is replying to a previous message
+3. Copies the operator's message to the user's private chat
+4. Logs the message and creates bidirectional link
+5. Handles errors if the user blocked the bot
+
+**Example flow:**
+```
+Operator replies in topic: "Your order will arrive tomorrow"
+  → Bot finds user_id from topic_id
+  → Bot copies message to user's private chat
+  → Bot logs message link for reply threading
+  → User receives: "Your order will arrive tomorrow"
+```
+
+**Parameters:**
+
+<ParamField path="message" type="Message" required>
+  The operator's message in the forum topic
+</ParamField>
+
+<ParamField path="bot" type="Bot" required>
+  Bot instance injected by Dispatcher
+</ParamField>
+
+<ParamField path="db" type="Database" required>
+  Database instance injected by Dispatcher
+</ParamField>
+
+<ParamField path="log_messages" type="bool" default="True">
+  Whether to log messages
+</ParamField>
+
+**Reply Chain Handling:**
+```python
+reply_params = None
+if message.reply_to_message is not None:
+    target_message_id = await db.find_linked_message_id(
+        source_chat_id=message.chat.id,
+        source_message_id=message.reply_to_message.message_id,
+        target_chat_id=user_id,
+    )
+    if target_message_id is not None:
+        reply_params = ReplyParameters(
+            message_id=target_message_id,
+            allow_sending_without_reply=True,
+        )
+```
+
+**Error Handling:**
+
+<CodeGroup>
+```python User Blocked Bot
+try:
+    copy_result = await bot.copy_message(
+        chat_id=user_id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        reply_parameters=reply_params,
+    )
+except TelegramForbiddenError:
+    await message.reply(
+        "The user has blocked the bot or has not opened the chat with the bot."
+    )
+    return
+```
+
+```python Copy Failed
+except TelegramBadRequest as err:
+    await message.reply(
+        f"Failed to send to the user: {getattr(err, 'message', str(err))}"
+    )
+    return
+```
+</CodeGroup>
+
+**Message Logging:**
+```python
+async with db.transaction():
+    # Log operator message in operator group
+    await db.log_message_link(
+        user_id=user_id,
+        source_chat_id=message.chat.id,
+        source_message_id=message.message_id,
+        target_chat_id=user_id,
+        target_message_id=int(copied_message_id),
+        commit=False,
+    )
+    # Log user's copy of the message
+    await db.log_message_link(
+        user_id=user_id,
+        source_chat_id=user_id,
+        source_message_id=int(copied_message_id),
+        target_chat_id=message.chat.id,
+        target_message_id=message.message_id,
+        commit=False,
+    )
+
+if log_messages:
+    await db.log_message(
+        user_id=user_id,
+        direction="operator",
+        chat_id=message.chat.id,
+        message_id=message.message_id,
+        content_type=message.content_type,
+        text=message.text,
+        caption=message.caption,
+        file_id=extract_file_id(message),
+        payload_json=safe_payload_json(message),
+    )
+```
+
+---
+
+## How Handlers Work
+
+### Dependency Injection
+
+Handlers receive dependencies from the Dispatcher. In `main.py`, these are registered as workflow data:
+
+```python
+dp = Dispatcher()
+dp.workflow_data.update({
+    "db": db,
+    "topics": topics,
+    "log_messages": config.log_messages,
+})
+dp.include_router(user.router)
+dp.include_router(operator.router)
+```
+
+When a handler is called, Aiogram automatically injects these values based on parameter names and types.
+
+### Filter System
+
+Filters determine which messages trigger which handlers:
+
+**User handlers:**
+- `CommandStart()`: Built-in filter for `/start` command
+- `F.chat.type == "private"`: Magic filter for private chats
+
+**Operator handler:**
+- `F.is_topic_message.is_(True)`: Magic filter for forum topic messages
+
+**Filter priority:**
+1. More specific filters (e.g., `CommandStart()`) match first
+2. Generic filters (e.g., `F.chat.type == "private"`) match remaining messages
+
+### Message Flow
+
+**User → Operator:**
+```
+1. User sends message in private chat
+2. user.py handler catches it
+3. Handler logs to database
+4. Handler calls topics.copy_user_message_to_topic()
+5. Message appears in operator's forum topic
+```
+
+**Operator → User:**
+```
+1. Operator replies in forum topic
+2. operator.py handler catches it
+3. Handler looks up user_id from topic_id
+4. Handler copies message to user's chat
+5. Handler logs bidirectional link
+6. User receives message
+```
+
+---
+
+## Utility Functions
+
+Handlers depend on utility functions from `telegram_utils.py`:
+
+### extract_file_id()
+
+Extracts the Telegram file ID from a message based on content type (photo, document, video, etc.).
+
+**Usage in handlers:**
+```python
+file_id = extract_file_id(message)
+```
+
+### safe_payload_json()
+
+Serializes the message object to JSON for logging, handling serialization errors gracefully.
+
+**Usage in handlers:**
+```python
+payload_json = safe_payload_json(message)
+```

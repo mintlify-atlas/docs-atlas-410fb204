@@ -1,0 +1,146 @@
+---
+title: Introduction
+description: Open-source Telegram support bot that creates a separate forum topic for each user
+mode: custom
+---
+
+<div className="relative bg-gradient-to-br from-[#0088cc] via-[#006ba6] to-[#005a8d] dark:from-[#006ba6] dark:via-[#005a8d] dark:to-[#004770] py-20">
+  <div className="max-w-6xl mx-auto px-6 text-center">
+    <h1 className="text-5xl md:text-6xl font-bold text-white mb-6">
+      Telegram Support Bot
+    </h1>
+    <p className="text-xl md:text-2xl text-white/90 max-w-3xl mx-auto mb-10">
+      Streamline customer support with a bot that creates a dedicated forum topic for each user, enabling your team to manage conversations efficiently.
+    </p>
+    <div className="flex flex-wrap gap-4 justify-center">
+      <a
+        href="/quickstart"
+        className="px-8 py-3.5 bg-white text-[#0088cc] font-semibold rounded-lg hover:bg-gray-100 transition-colors"
+      >
+        Get Started
+      </a>
+      <a
+        href="/concepts/architecture"
+        className="px-8 py-3.5 border-2 border-white/30 bg-white/10 text-white font-semibold rounded-lg hover:bg-white/20 transition-colors"
+      >
+        Learn How It Works
+      </a>
+    </div>
+  </div>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">
+    How it works
+  </h2>
+  <p className="text-lg text-gray-600 dark:text-gray-400 mb-8">
+    Get your support bot running in three simple steps
+  </p>
+
+  <Steps>
+    <Step title="Create your bot and operator group">
+      Create a new Telegram bot via [@BotFather](https://t.me/botfather) and set up a supergroup with Forum/Topics enabled. Add your bot to the group with **Manage Topics** permission.
+    </Step>
+    
+    <Step title="Configure and install">
+      Clone the repository, install dependencies, and configure your `.env` file with your bot token and operator group ID:
+
+      ```bash
+      git clone https://github.com/apkuzmin/telegram-support-bot.git
+      cd telegram-support-bot
+      python -m venv .venv
+      source .venv/bin/activate
+      pip install -r requirements.txt
+      ```
+
+      Create your `.env` file:
+      ```bash
+      BOT_TOKEN=123456:ABCDEF_your_token_here
+      OPERATOR_GROUP_ID=-1001234567890
+      DB_PATH=./support_bot.sqlite3
+      LOG_MESSAGES=1
+      ```
+    </Step>
+    
+    <Step title="Start the bot">
+      Run the bot and start receiving user messages:
+
+      ```bash
+      python -m support_bot
+      ```
+
+      When a user messages your bot, a new forum topic is automatically created in your operator group. All messages are mirrored bidirectionally — users see operator replies in their private chat, and operators work entirely within organized topics.
+    </Step>
+  </Steps>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">
+    Key features
+  </h2>
+  <p className="text-lg text-gray-600 dark:text-gray-400 mb-8">
+    Everything you need for organized customer support
+  </p>
+
+  <CardGroup cols={2}>
+    <Card title="One topic per user" icon="comments">
+      Each user gets a dedicated forum topic in your operator group, keeping conversations organized and easy to manage.
+    </Card>
+    <Card title="Bidirectional messaging" icon="arrows-left-right">
+      Messages flow seamlessly between users and operators. Users chat privately with the bot, operators reply from the forum topic.
+    </Card>
+    <Card title="Reply mirroring" icon="reply">
+      Reply to any message in the thread and the context is preserved on both sides with proper reply links.
+    </Card>
+    <Card title="Automatic topic creation" icon="wand-magic-sparkles">
+      No manual setup required. When a new user messages the bot, a topic is created automatically with their name and ID.
+    </Card>
+    <Card title="SQLite persistence" icon="database">
+      All routing, message links, and optional message history are stored in SQLite for reliable operation.
+    </Card>
+    <Card title="Built with aiogram 3" icon="code">
+      Modern async Python framework with robust Telegram Bot API support and clean architecture.
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">
+    Explore by topic
+  </h2>
+  <p className="text-lg text-gray-600 dark:text-gray-400 mb-8">
+    Deep dive into specific areas
+  </p>
+
+  <CardGroup cols={2}>
+    <Card title="Setup & Configuration" icon="gear" href="/setup/installation">
+      Complete installation guide, environment configuration, and Telegram bot setup instructions.
+    </Card>
+    <Card title="Core Concepts" icon="brain" href="/concepts/architecture">
+      Understand the architecture, message flow, topic management, and database design.
+    </Card>
+    <Card title="Deployment Guides" icon="rocket" href="/guides/deployment">
+      Deploy to production with systemd, Docker, or your preferred platform.
+    </Card>
+    <Card title="API Reference" icon="book-open" href="/api/database">
+      Detailed documentation of all classes, methods, and configuration options.
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="mt-20 mb-16 max-w-5xl mx-auto px-6">
+  <div className="bg-gradient-to-r from-[#0088cc]/10 to-[#006ba6]/10 dark:from-[#0088cc]/20 dark:to-[#006ba6]/20 rounded-2xl p-10 border border-[#0088cc]/20 dark:border-[#0088cc]/30">
+    <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">
+      Ready to get started?
+    </h2>
+    <p className="text-lg text-gray-600 dark:text-gray-400 mb-6">
+      Follow our quickstart guide to have your support bot running in under 5 minutes.
+    </p>
+    <a
+      href="/quickstart"
+      className="inline-block px-8 py-3.5 bg-[#0088cc] text-white font-semibold rounded-lg hover:bg-[#006ba6] transition-colors"
+    >
+      Get Started Now
+    </a>
+  </div>
+</div>

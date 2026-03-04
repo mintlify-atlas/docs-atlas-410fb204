@@ -1,0 +1,516 @@
+---
+title: Customize your bot
+description: Learn how to customize greeting messages, topic names, handlers, and database schema
+icon: paintbrush
+---
+
+This guide shows you how to customize your Telegram support bot to match your brand and requirements.
+
+## Change the greeting message
+
+The greeting message is sent when a user starts a conversation with your bot using the `/start` command.
+
+### Default greeting
+
+The default implementation sends a simple greeting:
+
+```python support_bot/handlers/user.py (lines 37-47)
+@router.message(CommandStart(), F.chat.type == "private")
+async def start(
+    message: Message, bot: Bot, db: Database, topics: TopicManager, log_messages: bool = True
+) -> None:
+    if message.from_user is None:
+        return
+
+    await _log_user_message(db, message, log_messages=log_messages)
+    await topics.copy_user_message_to_topic(bot, message)
+
+    await message.answer("Hello! How can I help you?")
+```
+
+### Customize the greeting
+
+<Steps>
+  <Step title="Edit the handler">
+    Open `support_bot/handlers/user.py` and modify the greeting message on line 47:
+    
+    ```python
+    await message.answer("Hello! How can I help you?")
+    ```
+    
+    Change it to your custom message:
+    
+    ```python
+    await message.answer(
+        "Welcome to Our Support! 👋\n\n"
+        "Our team will respond to your message shortly.\n"
+        "Please describe your issue in detail."
+    )
+    ```
+  </Step>
+  
+  <Step title="Add HTML formatting">
+    The bot uses HTML parse mode by default:
+    
+    ```python support_bot/main.py (lines 33-36)
+    bot = Bot(
+        token=config.bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    ```
+    
+    You can use HTML tags in your greeting:
+    
+    ```python
+    await message.answer(
+        "<b>Welcome to Our Support!</b>\n\n"
+        "Our team will respond <i>shortly</i>.\n\n"
+        "Please use the format:\n"
+        "<code>Issue: [description]</code>"
+    )
+    ```
+  </Step>
+  
+  <Step title="Restart the bot">
+    After making changes, restart your bot:
+    
+    ```bash
+    # For systemd
+    sudo systemctl restart telegram-support-bot
+    
+    # For Docker
+    docker restart support-bot
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Supported HTML tags: `<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<pre>`, `<a href="...">`, `<tg-spoiler>`
+</Note>
+
+## Customize topic names
+
+When a user contacts your bot, a topic is created in the operator group with the user's information.
+
+### Default topic naming
+
+The default topic name includes the user's full name, username, and ID:
+
+```python support_bot/topic_manager.py (lines 19-24)
+def _topic_name(user: User) -> str:
+    base = user.full_name or "User"
+    if user.username:
+        base = f"{base} (@{user.username})"
+    name = f"{base} [{user.id}]"
+    return name[:128]
+```
+
+Example output: `John Doe (@johndoe) [123456789]`
+
+### Customize topic names
+
+<Accordion title="Option 1: Modify the function">
+  Edit the `_topic_name` function in `support_bot/topic_manager.py`:
+  
+  ```python
+  def _topic_name(user: User) -> str:
+      # Just show username and ID
+      if user.username:
+          return f"@{user.username} ({user.id})"
+      # Fallback to first name and ID
+      return f"{user.first_name or 'User'} ({user.id})"
+  ```
+</Accordion>
+
+<Accordion title="Option 2: Add emojis">
+  Make topics more visual with emojis:
+  
+  ```python
+  def _topic_name(user: User) -> str:
+      base = user.full_name or "User"
+      if user.username:
+          base = f"👤 {base} (@{user.username})"
+      else:
+          base = f"👤 {base}"
+      name = f"{base} • {user.id}"
+      return name[:128]
+  ```
+</Accordion>
+
+<Accordion title="Option 3: Include timestamp">
+  Add the current time to the topic name:
+  
+  ```python
+  from datetime import datetime
+  
+  def _topic_name(user: User) -> str:
+      timestamp = datetime.now().strftime("%H:%M")
+      base = user.full_name or "User"
+      if user.username:
+          base = f"{base} (@{user.username})"
+      name = f"[{timestamp}] {base} [{user.id}]"
+      return name[:128]
+  ```
+</Accordion>
+
+<Warning>
+Telegram limits topic names to 128 characters. The function automatically truncates longer names with `[:128]`.
+</Warning>
+
+## Customize the initial topic message
+
+When a topic is created, the bot sends an initial message with user information:
+
+```python support_bot/topic_manager.py (lines 74-83)
+username_line = f"@{user.username}" if user.username else "—"
+await bot.send_message(
+    chat_id=self._operator_group_id,
+    message_thread_id=topic.message_thread_id,
+    text=(
+        "New conversation.\n"
+        f"User: {user.full_name}\n"
+        f"ID: <code>{user.id}</code>\n"
+        f"Username: {username_line}"
+    ),
+)
+```
+
+### Enhance the welcome message
+
+Modify this message to include more information:
+
+```python
+username_line = f"@{user.username}" if user.username else "No username"
+profile_link = f"tg://user?id={user.id}"
+
+await bot.send_message(
+    chat_id=self._operator_group_id,
+    message_thread_id=topic.message_thread_id,
+    text=(
+        "🆕 <b>New Support Conversation</b>\n\n"
+        f"👤 User: <a href=\"{profile_link}\">{user.full_name}</a>\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"📱 Username: {username_line}\n\n"
+        f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    ),
+)
+```
+
+## Add custom message handlers
+
+You can add custom handlers to process specific commands or message types.
+
+### Create a custom handler
+
+<Steps>
+  <Step title="Add handler to user router">
+    Open `support_bot/handlers/user.py` and add a new handler:
+    
+    ```python
+    @router.message(F.text == "/help", F.chat.type == "private")
+    async def help_command(
+        message: Message, bot: Bot, db: Database, topics: TopicManager
+    ) -> None:
+        await message.answer(
+            "<b>Available Commands:</b>\n"
+            "/start - Start a new conversation\n"
+            "/help - Show this help message\n"
+            "/status - Check your support ticket status\n\n"
+            "Just send a message to contact support!"
+        )
+    ```
+  </Step>
+  
+  <Step title="Add a status command">
+    Create a handler to show conversation status:
+    
+    ```python
+    @router.message(F.text == "/status", F.chat.type == "private")
+    async def status_command(
+        message: Message, db: Database
+    ) -> None:
+        if message.from_user is None:
+            return
+        
+        conversation = await db.get_active_conversation(message.from_user.id)
+        if conversation:
+            await message.answer(
+                "✅ You have an active support conversation.\n"
+                "Our team will respond soon!"
+            )
+        else:
+            await message.answer(
+                "📭 You don't have any active conversations.\n"
+                "Send a message to start one!"
+            )
+    ```
+  </Step>
+  
+  <Step title="Register the router">
+    The router is automatically registered in `main.py`:
+    
+    ```python support_bot/main.py (line 45)
+    dp.include_router(user_router)
+    ```
+    
+    Your new handlers will be included automatically.
+  </Step>
+</Steps>
+
+### Handle specific content types
+
+Add handlers for photos, documents, or other media:
+
+```python
+@router.message(F.photo, F.chat.type == "private")
+async def photo_message(
+    message: Message, bot: Bot, db: Database, topics: TopicManager
+) -> None:
+    if message.from_user is None:
+        return
+    
+    await _log_user_message(db, message, log_messages=True)
+    await topics.copy_user_message_to_topic(bot, message)
+    
+    await message.answer("📸 Photo received! Our team will review it.")
+```
+
+<Note>
+The `any_private_message` handler (line 50 in `user.py`) catches all messages that don't match specific handlers, so most content types are already handled.
+</Note>
+
+## Extend the database schema
+
+You can add custom tables to track additional data.
+
+### Current schema
+
+The bot creates these tables:
+
+```python support_bot/db.py (lines 62-127)
+CREATE TABLE IF NOT EXISTS users (
+  user_id      INTEGER PRIMARY KEY,
+  username     TEXT,
+  first_name   TEXT,
+  last_name    TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  user_id      INTEGER PRIMARY KEY,
+  topic_id     INTEGER NOT NULL,
+  active       INTEGER NOT NULL DEFAULT 1,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL,
+  direction    TEXT NOT NULL,   -- 'user' or 'operator'
+  chat_id      INTEGER NOT NULL,
+  message_id   INTEGER NOT NULL,
+  content_type TEXT NOT NULL,
+  text         TEXT,
+  caption      TEXT,
+  file_id      TEXT,
+  payload_json TEXT,
+  created_at   TEXT NOT NULL,
+  FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS message_links (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id           INTEGER NOT NULL,
+  source_chat_id    INTEGER NOT NULL,
+  source_message_id INTEGER NOT NULL,
+  target_chat_id    INTEGER NOT NULL,
+  target_message_id INTEGER NOT NULL,
+  created_at        TEXT NOT NULL,
+  FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+```
+
+### Add custom tables
+
+<Steps>
+  <Step title="Modify the init method">
+    Edit `support_bot/db.py` and add your custom table in the `init` method:
+    
+    ```python
+    async def init(self) -> None:
+        await self.conn.executescript(
+            """
+            -- Existing tables...
+            
+            CREATE TABLE IF NOT EXISTS tags (
+              id          INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id     INTEGER NOT NULL,
+              tag_name    TEXT NOT NULL,
+              created_at  TEXT NOT NULL,
+              FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_tags_user_id
+              ON tags(user_id);
+            """
+        )
+        await self.conn.commit()
+    ```
+  </Step>
+  
+  <Step title="Add database methods">
+    Add methods to interact with your custom table:
+    
+    ```python
+    async def add_tag(self, user_id: int, tag_name: str) -> None:
+        await self.conn.execute(
+            "INSERT INTO tags (user_id, tag_name, created_at) VALUES (?, ?, ?)",
+            (user_id, tag_name, _now_iso()),
+        )
+        await self.conn.commit()
+    
+    async def get_user_tags(self, user_id: int) -> list[str]:
+        cur = await self.conn.execute(
+            "SELECT tag_name FROM tags WHERE user_id = ?",
+            (user_id,),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return [row[0] for row in rows]
+    ```
+  </Step>
+  
+  <Step title="Use in handlers">
+    Use your custom database methods in handlers:
+    
+    ```python
+    @router.message(F.text.startswith("/tag "), F.chat.type == "private")
+    async def add_tag_command(
+        message: Message, db: Database
+    ) -> None:
+        if message.from_user is None:
+            return
+        
+        tag_name = message.text.replace("/tag ", "").strip()
+        await db.add_tag(message.from_user.id, tag_name)
+        await message.answer(f"✅ Tag '{tag_name}' added!")
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+Database schema changes are additive only. The `CREATE TABLE IF NOT EXISTS` statement ensures tables aren't recreated if they already exist.
+</Warning>
+
+## Customize message formatting
+
+### Change parse mode
+
+The bot uses HTML by default. To use Markdown instead:
+
+```python support_bot/main.py (lines 33-36)
+bot = Bot(
+    token=config.bot_token,
+    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN_V2),
+)
+```
+
+Then update your message formatting:
+
+```python
+# HTML (current)
+await message.answer("<b>Bold</b> and <i>italic</i>")
+
+# Markdown V2
+await message.answer("*Bold* and _italic_")
+```
+
+### Add custom message logging
+
+The bot logs messages when `LOG_MESSAGES=1`:
+
+```python support_bot/handlers/user.py (lines 15-34)
+async def _log_user_message(db: Database, message: Message, *, log_messages: bool) -> None:
+    if message.from_user is None:
+        return
+    if not log_messages:
+        return
+
+    await db.log_user_message(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        direction="user",
+        chat_id=message.chat.id,
+        message_id=message.message_id,
+        content_type=message.content_type,
+        text=message.text,
+        caption=message.caption,
+        file_id=extract_file_id(message),
+        payload_json=safe_payload_json(message),
+    )
+```
+
+You can extend this function to add custom logging logic or integrations.
+
+## Handle link preview
+
+The bot disables link previews when copying messages with links:
+
+```python support_bot/topic_manager.py (lines 115-124)
+if message.content_type == "text" and _message_has_links(message):
+    try:
+        sent = await bot.send_message(
+            chat_id=self._operator_group_id,
+            message_thread_id=topic.topic_id,
+            text=message.text or "",
+            entities=message.entities,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            reply_parameters=reply_params,
+        )
+```
+
+To enable link previews, change `is_disabled=True` to `is_disabled=False`.
+
+## Add operator commands
+
+Create commands that only work in the operator group:
+
+```python support_bot/handlers/operator.py
+@router.message(F.text == "/close", F.is_topic_message.is_(True))
+async def close_topic(
+    message: Message, db: Database
+) -> None:
+    if message.message_thread_id is None:
+        return
+    
+    user_id = await db.find_user_id_by_topic(int(message.message_thread_id))
+    if user_id:
+        await db.deactivate_conversation(user_id)
+        await message.reply("✅ Conversation closed.")
+    else:
+        await message.reply("❌ No active conversation in this topic.")
+```
+
+The operator router is automatically filtered to only work in the operator group:
+
+```python support_bot/main.py (lines 47-48)
+operator_router.message.filter(F.chat.id == config.operator_group_id)
+dp.include_router(operator_router)
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy to production" icon="rocket" href="/guides/deployment">
+    Learn how to deploy your customized bot to production
+  </Card>
+  
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Solutions for common issues you might encounter
+  </Card>
+</CardGroup>

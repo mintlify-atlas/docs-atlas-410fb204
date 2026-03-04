@@ -1,0 +1,532 @@
+---
+title: Deploy to production
+description: Learn how to deploy your Telegram support bot to production with systemd, Docker, and monitoring
+icon: rocket
+---
+
+This guide covers production deployment options for your Telegram support bot, including systemd service setup, Docker deployment, monitoring, and backup strategies.
+
+## Prerequisites
+
+Before deploying to production, ensure you have:
+
+- A Linux server with Python 3.8+ installed
+- Your bot token from [@BotFather](https://t.me/BotFather)
+- A Telegram supergroup with topics enabled
+- Required permissions configured for your bot
+
+## Systemd service deployment
+
+### Install dependencies
+
+First, set up a virtual environment and install the required packages:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Your bot requires these dependencies:
+
+```txt requirements.txt
+aiogram==3.13.1
+aiosqlite==0.20.0
+python-dotenv==1.0.1
+```
+
+### Configure environment variables
+
+Create a `.env` file with your bot configuration:
+
+```bash .env
+BOT_TOKEN=123456:ABCDEF_your_token_here
+# Supergroup chat id (usually starts with -100...)
+OPERATOR_GROUP_ID=-1001234567890
+# Path to SQLite DB file
+DB_PATH=./support_bot.sqlite3
+LOG_LEVEL=INFO
+# Store messages history in SQLite (set to 0 to disable)
+LOG_MESSAGES=1
+```
+
+<Note>
+The `OPERATOR_GROUP_ID` must be a supergroup ID (starts with `-100`). Regular groups and channels are not supported.
+</Note>
+
+### Create systemd service
+
+Create a systemd service file to manage your bot as a system service:
+
+```ini /etc/systemd/system/telegram-support-bot.service
+[Unit]
+Description=Telegram Support Bot
+After=network.target
+
+[Service]
+Type=simple
+User=telegram-bot
+WorkingDirectory=/opt/telegram-support-bot
+EnvironmentFile=/opt/telegram-support-bot/.env
+ExecStart=/opt/telegram-support-bot/venv/bin/python -m support_bot.main
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/telegram-support-bot
+
+[Install]
+WantedBy=multi-user.target
+```
+
+<Steps>
+  <Step title="Create service user">
+    Create a dedicated user for running the bot:
+    
+    ```bash
+    sudo useradd -r -s /bin/false telegram-bot
+    sudo mkdir -p /opt/telegram-support-bot
+    sudo chown telegram-bot:telegram-bot /opt/telegram-support-bot
+    ```
+  </Step>
+  
+  <Step title="Copy files">
+    Copy your bot files to the deployment directory:
+    
+    ```bash
+    sudo cp -r support_bot /opt/telegram-support-bot/
+    sudo cp .env /opt/telegram-support-bot/
+    sudo cp requirements.txt /opt/telegram-support-bot/
+    sudo chown -R telegram-bot:telegram-bot /opt/telegram-support-bot
+    ```
+  </Step>
+  
+  <Step title="Enable and start service">
+    Enable the service to start on boot and start it:
+    
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl enable telegram-support-bot
+    sudo systemctl start telegram-support-bot
+    ```
+  </Step>
+  
+  <Step title="Verify status">
+    Check that the service is running:
+    
+    ```bash
+    sudo systemctl status telegram-support-bot
+    ```
+  </Step>
+</Steps>
+
+## Docker deployment
+
+For containerized deployment, create a Dockerfile based on the bot's requirements:
+
+```dockerfile Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY support_bot /app/support_bot
+
+# Create volume mount point for database
+VOLUME /app/data
+
+# Run as non-root user
+RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
+USER botuser
+
+CMD ["python", "-m", "support_bot.main"]
+```
+
+### Build and run with Docker
+
+<Steps>
+  <Step title="Build the image">
+    ```bash
+    docker build -t telegram-support-bot .
+    ```
+  </Step>
+  
+  <Step title="Run the container">
+    ```bash
+    docker run -d \
+      --name support-bot \
+      --restart unless-stopped \
+      -v $(pwd)/data:/app/data \
+      -e BOT_TOKEN="123456:ABCDEF_your_token_here" \
+      -e OPERATOR_GROUP_ID="-1001234567890" \
+      -e DB_PATH="/app/data/support_bot.sqlite3" \
+      -e LOG_LEVEL="INFO" \
+      -e LOG_MESSAGES="1" \
+      telegram-support-bot
+    ```
+  </Step>
+</Steps>
+
+### Docker Compose
+
+Alternatively, use Docker Compose for easier management:
+
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  support-bot:
+    build: .
+    container_name: telegram-support-bot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/support_bot.sqlite3
+```
+
+Start with:
+
+```bash
+docker-compose up -d
+```
+
+## Process management
+
+### Service management commands
+
+<CardGroup cols={2}>
+  <Card title="Start" icon="play">
+    ```bash
+    sudo systemctl start telegram-support-bot
+    ```
+  </Card>
+  
+  <Card title="Stop" icon="stop">
+    ```bash
+    sudo systemctl stop telegram-support-bot
+    ```
+  </Card>
+  
+  <Card title="Restart" icon="rotate">
+    ```bash
+    sudo systemctl restart telegram-support-bot
+    ```
+  </Card>
+  
+  <Card title="Status" icon="circle-info">
+    ```bash
+    sudo systemctl status telegram-support-bot
+    ```
+  </Card>
+</CardGroup>
+
+### Docker management commands
+
+<CardGroup cols={2}>
+  <Card title="View logs" icon="file-lines">
+    ```bash
+    docker logs -f support-bot
+    ```
+  </Card>
+  
+  <Card title="Restart" icon="rotate">
+    ```bash
+    docker restart support-bot
+    ```
+  </Card>
+  
+  <Card title="Stop" icon="stop">
+    ```bash
+    docker stop support-bot
+    ```
+  </Card>
+  
+  <Card title="Remove" icon="trash">
+    ```bash
+    docker rm -f support-bot
+    ```
+  </Card>
+</CardGroup>
+
+## Monitoring and logs
+
+### View logs with systemd
+
+The bot logs important events using Python's logging module:
+
+```bash
+# View real-time logs
+sudo journalctl -u telegram-support-bot -f
+
+# View recent logs
+sudo journalctl -u telegram-support-bot -n 100
+
+# View logs from today
+sudo journalctl -u telegram-support-bot --since today
+```
+
+### Log levels
+
+Configure the log level in your `.env` file:
+
+```python support_bot/main.py (lines 23-24)
+logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
+log = logging.getLogger("support_bot")
+```
+
+Available log levels:
+- `DEBUG` - Detailed information for diagnosing problems
+- `INFO` - Confirmation that things are working as expected (default)
+- `WARNING` - Indication of unexpected events
+- `ERROR` - Serious problems that prevent functionality
+
+### Startup log message
+
+When the bot starts successfully, you'll see:
+
+```python support_bot/main.py (lines 50-51)
+me = await bot.get_me()
+log.info("Started as @%s (id=%s)", me.username, me.id)
+```
+
+<Note>
+Set `LOG_MESSAGES=1` in your `.env` file to store all messages in the SQLite database for auditing and analytics.
+</Note>
+
+## Database backup
+
+Your bot uses SQLite with WAL mode enabled for better concurrency:
+
+```python support_bot/db.py (lines 30-32)
+self._conn = await aiosqlite.connect(self._path)
+await self._conn.execute("PRAGMA journal_mode=WAL;")
+await self._conn.execute("PRAGMA foreign_keys=ON;")
+```
+
+### Backup strategies
+
+<Accordion title="Manual backup">
+  Create a backup of your database file:
+  
+  ```bash
+  # For systemd deployment
+  sudo cp /opt/telegram-support-bot/support_bot.sqlite3 \
+       /opt/telegram-support-bot/backups/support_bot_$(date +%Y%m%d).sqlite3
+  
+  # For Docker deployment
+  docker exec support-bot cp /app/data/support_bot.sqlite3 \
+                              /app/data/support_bot_backup.sqlite3
+  ```
+</Accordion>
+
+<Accordion title="Automated backup with cron">
+  Create a daily backup using cron:
+  
+  ```bash
+  # Add to crontab (crontab -e)
+  0 2 * * * cp /opt/telegram-support-bot/support_bot.sqlite3 \
+               /opt/telegram-support-bot/backups/support_bot_$(date +\%Y\%m\%d).sqlite3
+  
+  # Clean up old backups (keep last 30 days)
+  0 3 * * * find /opt/telegram-support-bot/backups -name "*.sqlite3" -mtime +30 -delete
+  ```
+</Accordion>
+
+<Accordion title="Backup WAL files">
+  SQLite WAL mode creates additional files. Backup all three:
+  
+  ```bash
+  cp support_bot.sqlite3 backup/
+  cp support_bot.sqlite3-wal backup/
+  cp support_bot.sqlite3-shm backup/
+  ```
+  
+  Or use SQLite's built-in backup:
+  
+  ```bash
+  sqlite3 support_bot.sqlite3 ".backup backup/support_bot_$(date +%Y%m%d).sqlite3"
+  ```
+</Accordion>
+
+<Warning>
+Always test your backups by restoring them to a test environment to ensure they're valid.
+</Warning>
+
+## Security considerations
+
+### Protect your bot token
+
+<Steps>
+  <Step title="Use environment variables">
+    Never hardcode your bot token in source code. The bot uses python-dotenv to load configuration:
+    
+    ```python support_bot/main.py (lines 20-21)
+    load_dotenv()
+    config = load_config()
+    ```
+  </Step>
+  
+  <Step title="Set file permissions">
+    Restrict access to your `.env` file:
+    
+    ```bash
+    chmod 600 .env
+    sudo chown telegram-bot:telegram-bot /opt/telegram-support-bot/.env
+    ```
+  </Step>
+  
+  <Step title="Use secrets management">
+    For production, consider using a secrets management service like:
+    - HashiCorp Vault
+    - AWS Secrets Manager
+    - Azure Key Vault
+    - Environment variables from your orchestration platform
+  </Step>
+</Steps>
+
+### Database security
+
+The bot enables foreign key constraints for data integrity:
+
+```python support_bot/db.py (lines 31-32)
+await self._conn.execute("PRAGMA journal_mode=WAL;")
+await self._conn.execute("PRAGMA foreign_keys=ON;")
+```
+
+Additional security measures:
+
+- Set restrictive file permissions: `chmod 600 support_bot.sqlite3`
+- Regular backups with encryption
+- Monitor database file size for unusual growth
+- Use read-only database replicas for analytics
+
+### Network security
+
+<CardGroup cols={2}>
+  <Card title="HTTPS only" icon="lock">
+    The aiogram library uses HTTPS by default for all Telegram API requests.
+  </Card>
+  
+  <Card title="Firewall rules" icon="shield">
+    No inbound ports needed. The bot uses long polling to receive updates.
+  </Card>
+  
+  <Card title="Rate limiting" icon="gauge">
+    Telegram enforces rate limits. The bot handles errors gracefully.
+  </Card>
+  
+  <Card title="Updates" icon="arrows-rotate">
+    Keep dependencies updated to patch security vulnerabilities.
+  </Card>
+</CardGroup>
+
+### User privacy
+
+The bot stores user data in compliance with privacy best practices:
+
+```python support_bot/db.py (lines 62-69)
+CREATE TABLE IF NOT EXISTS users (
+  user_id      INTEGER PRIMARY KEY,
+  username     TEXT,
+  first_name   TEXT,
+  last_name    TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+```
+
+<Warning>
+Ensure your use of this bot complies with:
+- GDPR (if serving EU users)
+- Your local data protection regulations
+- Telegram's Terms of Service and Privacy Policy
+</Warning>
+
+## Health checks
+
+The database includes a health check method:
+
+```python support_bot/db.py (lines 338-342)
+async def healthcheck(self) -> dict[str, Any]:
+    cur = await self.conn.execute("SELECT 1;")
+    row = await cur.fetchone()
+    await cur.close()
+    return {"ok": row == (1,)}
+```
+
+You can extend this to create a health check endpoint for monitoring tools.
+
+## Troubleshooting deployment
+
+<AccordionGroup>
+  <Accordion title="Bot won't start">
+    Check the logs for errors:
+    
+    ```bash
+    sudo journalctl -u telegram-support-bot -n 50
+    ```
+    
+    Common issues:
+    - Invalid bot token
+    - Missing environment variables
+    - Database file permissions
+    - Python version mismatch
+  </Accordion>
+  
+  <Accordion title="Database locked errors">
+    The bot uses a transaction lock to prevent conflicts:
+    
+    ```python support_bot/db.py (lines 48-57)
+    @asynccontextmanager
+    async def transaction(self) -> Any:
+        async with self._tx_lock:
+            await self.conn.execute("BEGIN;")
+            try:
+                yield
+            except BaseException:
+                await self.conn.rollback()
+                raise
+            else:
+                await self.conn.commit()
+    ```
+    
+    If you still see errors, ensure only one bot instance is running.
+  </Accordion>
+  
+  <Accordion title="High memory usage">
+    Monitor the bot's memory usage:
+    
+    ```bash
+    # For systemd
+    systemctl status telegram-support-bot
+    
+    # For Docker
+    docker stats support-bot
+    ```
+    
+    Consider setting memory limits in your systemd service or Docker container.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Customize your bot" icon="paintbrush" href="/guides/customization">
+    Learn how to customize greetings, topic names, and add custom handlers
+  </Card>
+  
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Solutions for common issues and error messages
+  </Card>
+</CardGroup>

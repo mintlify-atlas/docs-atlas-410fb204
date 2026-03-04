@@ -1,0 +1,354 @@
+---
+title: Telegram setup
+description: Configure your Telegram bot and operator group for the Support Bot
+---
+
+This guide walks you through setting up the Telegram-specific components required for the Support Bot: creating your bot, setting up the operator group with Forum/Topics, and configuring permissions.
+
+## Create your bot with BotFather
+
+BotFather is Telegram's official bot for creating and managing bots.
+
+<Steps>
+  <Step title="Start a chat with BotFather">
+    Open Telegram and search for [@BotFather](https://t.me/BotFather), or click the link to open a chat.
+    
+    Click **Start** or send `/start` to begin.
+  </Step>
+
+  <Step title="Create a new bot">
+    Send the `/newbot` command to BotFather.
+    
+    ```
+    /newbot
+    ```
+    
+    BotFather will ask you for two pieces of information:
+    
+    1. **Bot name** - The display name for your bot (e.g., "My Support Bot")
+    2. **Bot username** - A unique username ending in "bot" (e.g., "my_support_bot")
+  </Step>
+
+  <Step title="Save your bot token">
+    After creation, BotFather will send you a message containing your bot token:
+    
+    ```
+    Done! Congratulations on your new bot.
+    You will find it at t.me/your_bot_username
+    Use this token to access the HTTP API:
+    123456789:ABCDEFghijklmnopQRSTUVwxyz123456789
+    ```
+    
+    <Warning>
+      **Keep this token secret!** Anyone with your token can control your bot. Never commit it to version control or share it publicly.
+    </Warning>
+    
+    Copy the token and add it to your `.env` file:
+    
+    ```bash .env
+    BOT_TOKEN=123456789:ABCDEFghijklmnopQRSTUVwxyz123456789
+    ```
+  </Step>
+
+  <Step title="Configure bot settings (optional)">
+    You can customize your bot's appearance:
+    
+    - `/setdescription` - Set a description shown in the bot's profile
+    - `/setabouttext` - Set the "About" text
+    - `/setuserpic` - Upload a profile picture
+    - `/setcommands` - Define bot commands for the menu
+  </Step>
+</Steps>
+
+## Create and configure the operator group
+
+The operator group is where your support team will handle user conversations. Each user gets their own forum topic in this group.
+
+<Steps>
+  <Step title="Create a supergroup">
+    The bot requires a **supergroup** (not a regular group) with Forum/Topics enabled.
+    
+    1. In Telegram, create a new group
+    2. Add at least one member (you can remove them later)
+    3. Go to group settings → **Group Type** → **Convert to Supergroup**
+    
+    <Note>
+      If you already have a supergroup, you can use it. Skip to the next step to enable Topics.
+    </Note>
+  </Step>
+
+  <Step title="Enable Forum/Topics">
+    Topics (also called Forums) allow the bot to create separate conversation threads for each user.
+    
+    1. Open the supergroup
+    2. Tap the group name at the top to open settings
+    3. Go to **Group Type** or **Permissions**
+    4. Enable **Topics** (the toggle should turn blue/green)
+    
+    <Warning>
+      The bot will **not work** without Topics enabled. Forum topics are essential for organizing user conversations.
+    </Warning>
+  </Step>
+
+  <Step title="Add your bot to the group">
+    1. Open the supergroup
+    2. Tap the group name → **Add Members**
+    3. Search for your bot by username (e.g., `@my_support_bot`)
+    4. Add the bot to the group
+  </Step>
+
+  <Step title="Promote bot to administrator">
+    The bot needs administrator permissions to manage topics and send messages.
+    
+    1. Open the supergroup settings
+    2. Go to **Administrators** → tap on your bot
+    3. Enable the following permissions:
+       - **Manage Topics** (required) - Create and manage forum topics
+       - **Delete Messages** (optional) - Clean up topics
+       - **Pin Messages** (optional) - Pin important messages in topics
+    
+    <Warning>
+      **Manage Topics** permission is critical. Without it, the bot cannot create topics for new users and will fail silently.
+    </Warning>
+    
+    The required permissions are enforced by checking in `main.py:39` when initializing the TopicManager:
+    
+    ```python support_bot/main.py
+    topics = TopicManager(db=db, operator_group_id=config.operator_group_id)
+    ```
+  </Step>
+</Steps>
+
+## Get the group ID
+
+You need the supergroup's chat ID for the `OPERATOR_GROUP_ID` configuration variable.
+
+<Steps>
+  <Step title="Add a bot to get the ID">
+    The easiest way to get the group ID is using a helper bot.
+    
+    <Tabs>
+      <Tab title="Method 1: Using @RawDataBot">
+        1. Add [@RawDataBot](https://t.me/RawDataBot) to your operator group
+        2. The bot will immediately send a message with the group information
+        3. Look for `"chat": {"id": -1001234567890}`
+        4. Copy the negative number (including the minus sign)
+        
+        Example response:
+        ```json
+        {
+          "chat": {
+            "id": -1001234567890,
+            "type": "supergroup",
+            "title": "Support Operators"
+          }
+        }
+        ```
+      </Tab>
+      
+      <Tab title="Method 2: Using @getidsbot">
+        1. Add [@getidsbot](https://t.me/getidsbot) to your operator group
+        2. The bot will send a message with IDs
+        3. Look for the group ID (starts with `-100`)
+        4. Copy the ID
+      </Tab>
+      
+      <Tab title="Method 3: Using your bot">
+        1. Temporarily add a debug handler to your bot:
+        
+        ```python
+        @router.message()
+        async def debug_handler(message: Message):
+            print(f"Chat ID: {message.chat.id}")
+        ```
+        
+        2. Send a message to the group
+        3. Check your bot's console output for the chat ID
+        4. Remove the debug handler after getting the ID
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Add to configuration">
+    Add the group ID to your `.env` file:
+    
+    ```bash .env
+    OPERATOR_GROUP_ID=-1001234567890
+    ```
+    
+    <Note>
+      The ID will always be a negative number starting with `-100` for supergroups. If you see a positive number or one without `-100` prefix, you might have a regular group instead of a supergroup.
+    </Note>
+  </Step>
+
+  <Step title="Remove helper bots (optional)">
+    After getting the group ID, you can remove the helper bot from your operator group if desired.
+  </Step>
+</Steps>
+
+## Test your setup
+
+Verify that everything is configured correctly before running the bot.
+
+<Steps>
+  <Step title="Verify group settings">
+    Confirm your operator group has:
+    
+    <Checklist>
+      - [ ] Group is converted to a supergroup
+      - [ ] Topics/Forum is enabled
+      - [ ] Your bot is added as a member
+      - [ ] Bot has administrator permissions
+      - [ ] Bot has "Manage Topics" permission
+      - [ ] You have the correct group ID (starts with `-100`)
+    </Checklist>
+  </Step>
+
+  <Step title="Verify configuration file">
+    Check your `.env` file has all required values:
+    
+    ```bash .env
+    BOT_TOKEN=123456789:ABCDEFghijklmnopQRSTUVwxyz123456789
+    OPERATOR_GROUP_ID=-1001234567890
+    DB_PATH=./support_bot.sqlite3
+    LOG_LEVEL=INFO
+    LOG_MESSAGES=1
+    ```
+  </Step>
+
+  <Step title="Start the bot">
+    Run the bot to test the configuration:
+    
+    ```bash
+    python -m support_bot
+    ```
+    
+    You should see:
+    ```
+    INFO:support_bot:Started as @your_bot_username (id=123456789)
+    ```
+  </Step>
+
+  <Step title="Send a test message">
+    1. Open a private chat with your bot
+    2. Send `/start` or any message
+    3. Check your operator group - a new topic should be created
+    4. The user's message should appear in that topic
+    
+    <Note>
+      The topic title will be the user's name or username. All messages from that user will appear in this topic.
+    </Note>
+  </Step>
+
+  <Step title="Test operator replies">
+    1. In the operator group, open the user's topic
+    2. Reply to the user's message in the topic
+    3. Check your private chat with the bot - your reply should appear there
+    
+    <Tip>
+      The bot mirrors conversations bidirectionally. Users see operator replies as if they're chatting directly with the bot.
+    </Tip>
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Bot doesn't respond to messages">
+    **Possible causes:**
+    1. Bot token is incorrect or invalid
+    2. Bot is not running (check console for errors)
+    3. Bot was blocked or stopped by the user
+    
+    **Solutions:**
+    - Verify `BOT_TOKEN` in `.env` matches the token from @BotFather
+    - Check the bot process is running with `LOG_LEVEL=DEBUG`
+    - Try sending `/start` to restart the conversation
+  </Accordion>
+
+  <Accordion title="Topics are not being created">
+    **Possible causes:**
+    1. Topics/Forum is not enabled on the group
+    2. Bot doesn't have "Manage Topics" permission
+    3. The group is not a supergroup
+    4. Wrong `OPERATOR_GROUP_ID` in configuration
+    
+    **Solutions:**
+    - Verify Topics are enabled in group settings
+    - Check bot has administrator rights with "Manage Topics" permission
+    - Ensure the group is converted to a supergroup
+    - Verify `OPERATOR_GROUP_ID` matches your group's ID
+  </Accordion>
+
+  <Accordion title="Operator replies don't reach users">
+    **Possible causes:**
+    1. Replying outside of a topic (replies must be in the user's topic)
+    2. The original message was not mirrored by the bot
+    3. User blocked the bot
+    
+    **Solutions:**
+    - Always reply within the user's specific topic
+    - Check that user messages are appearing in topics first
+    - Verify the bot can send messages to the user
+  </Accordion>
+
+  <Accordion title="Can't get the group ID">
+    **Possible causes:**
+    1. Helper bot doesn't have permission to send messages
+    2. Using a regular group instead of a supergroup
+    
+    **Solutions:**
+    - Ensure the helper bot can send messages in the group
+    - Convert your group to a supergroup first
+    - Try Method 3 (using your own bot) from the "Get the group ID" section
+  </Accordion>
+
+  <Accordion title="Permission denied errors">
+    **Error in logs:**
+    ```
+    aiogram.exceptions.TelegramForbiddenError: Forbidden: bot is not a member of the supergroup
+    ```
+    or
+    ```
+    aiogram.exceptions.TelegramBadRequest: Bad Request: not enough rights to manage topics
+    ```
+    
+    **Solutions:**
+    - Ensure bot is added to the operator group
+    - Promote bot to administrator
+    - Grant "Manage Topics" permission explicitly
+  </Accordion>
+</AccordionGroup>
+
+## Requirements summary
+
+For quick reference, here are the Telegram requirements from the source code:
+
+<CardGroup cols={2}>
+  <Card title="Python Requirements" icon="python">
+    From `README.md:18-24`:
+    - Python **3.10+** (recommended **3.11+**)
+    - Bot permissions:
+      - **Manage Topics**
+      - Permission to send messages
+  </Card>
+  
+  <Card title="Group Requirements" icon="users">
+    - Supergroup (not regular group)
+    - Forum/Topics **enabled**
+    - Bot added as administrator
+    - Correct group ID in configuration
+  </Card>
+</CardGroup>
+
+<Note>
+  As stated in `README.md:53-55`: "The bot works only with supergroups that have Topics (Forum) enabled. If topics are not being created, check that the bot has the Manage Topics permission."
+</Note>
+
+## Next steps
+
+After completing the Telegram setup:
+
+1. [Run the bot and start handling messages](/quickstart)
+2. [Learn how message routing works](/concepts/message-flow)
+3. [Understand the database schema](/concepts/database)

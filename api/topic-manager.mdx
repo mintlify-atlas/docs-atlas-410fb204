@@ -1,0 +1,303 @@
+---
+title: Topic Manager
+description: Manages forum topics for user conversations in the operator group
+---
+
+The `TopicManager` class handles the creation and management of forum topics in the operator group, ensuring each user has a dedicated topic for their support conversation.
+
+## Class: TopicManager
+
+### Constructor
+
+```python
+TopicManager(db: Database, operator_group_id: int)
+```
+
+Creates a new TopicManager instance.
+
+<ParamField path="db" type="Database" required>
+  Database instance for storing conversation mappings
+</ParamField>
+
+<ParamField path="operator_group_id" type="int" required>
+  Telegram chat ID of the operator group with forum topics enabled
+</ParamField>
+
+**Example:**
+```python
+from support_bot.db import Database
+from support_bot.topic_manager import TopicManager
+
+db = Database("./support_bot.sqlite3")
+topics = TopicManager(db, operator_group_id=-1001234567890)
+```
+
+---
+
+## Public Methods
+
+### ensure_topic()
+
+```python
+await topics.ensure_topic(bot: Bot, user: User) -> TopicRef
+```
+
+Ensures a forum topic exists for the user. If an active conversation already exists, returns the existing topic. Otherwise, creates a new forum topic and sends an introduction message.
+
+<ParamField path="bot" type="Bot" required>
+  Aiogram Bot instance
+</ParamField>
+
+<ParamField path="user" type="User" required>
+  Telegram User object representing the user
+</ParamField>
+
+<ResponseField name="return" type="TopicRef">
+  A `TopicRef` containing `user_id` and `topic_id`
+</ResponseField>
+
+**Example:**
+```python
+topic = await topics.ensure_topic(bot, message.from_user)
+print(f"User {topic.user_id} → Topic {topic.topic_id}")
+```
+
+**Behavior:**
+- Acquires a per-user lock to prevent race conditions
+- Checks for existing active conversation
+- Creates a new forum topic with format: `"Full Name (@username) [user_id]"`
+- Saves the conversation mapping to the database
+- Sends an introduction message with user details:
+  ```
+  New conversation.
+  User: Alice Smith
+  ID: 123456789
+  Username: @alice
+  ```
+
+### copy_user_message_to_topic()
+
+```python
+await topics.copy_user_message_to_topic(bot: Bot, message: Message) -> TopicRef
+```
+
+Copies a user's message to their forum topic in the operator group. Handles reply chains, link previews, and error recovery.
+
+<ParamField path="bot" type="Bot" required>
+  Aiogram Bot instance
+</ParamField>
+
+<ParamField path="message" type="Message" required>
+  The message from the user to copy
+</ParamField>
+
+<ResponseField name="return" type="TopicRef">
+  A `TopicRef` for the user's topic
+</ResponseField>
+
+**Example:**
+```python
+# From handlers/user.py
+await topics.copy_user_message_to_topic(bot, message)
+```
+
+**Features:**
+- Preserves reply chains using `find_linked_message_id()`
+- Handles `TelegramForbiddenError` for messages with restricted content (e.g., links)
+  - Falls back to sending text with link preview disabled
+- Detects closed/deleted topics via `TelegramBadRequest`
+  - Automatically deactivates old conversation and creates new topic
+- Logs bidirectional message links for reply threading
+
+**Error Handling:**
+```python
+try:
+    copy_result = await bot.copy_message(
+        chat_id=self._operator_group_id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        message_thread_id=topic.topic_id,
+        reply_parameters=reply_params,
+    )
+except TelegramForbiddenError:
+    # Fallback for links: send as text with preview disabled
+    if message.content_type == "text" and _message_has_links(message):
+        await bot.send_message(
+            chat_id=self._operator_group_id,
+            message_thread_id=topic.topic_id,
+            text=message.text or "",
+            entities=message.entities,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            reply_parameters=reply_params,
+        )
+except TelegramBadRequest as err:
+    if _is_thread_missing(err):
+        # Topic was closed/deleted - create new one
+        await self._db.deactivate_conversation(message.from_user.id)
+        topic = await self.ensure_topic(bot, message.from_user)
+```
+
+---
+
+## Internal Methods
+
+These methods are used internally by the TopicManager but are documented here for completeness.
+
+### _lock_for()
+
+```python
+await topics._lock_for(user_id: int) -> asyncio.Lock
+```
+
+Returns a per-user lock to prevent concurrent topic creation for the same user.
+
+### _build_reply_params()
+
+```python
+await topics._build_reply_params(
+    *,
+    source_chat_id: int,
+    source_message: Message | None,
+    target_chat_id: int
+) -> ReplyParameters | None
+```
+
+Builds `ReplyParameters` for preserving reply chains when copying messages. Returns `None` if the source message is not a reply or if no linked message exists.
+
+**Example usage:**
+```python
+reply_params = await self._build_reply_params(
+    source_chat_id=message.chat.id,
+    source_message=message.reply_to_message,
+    target_chat_id=self._operator_group_id,
+)
+```
+
+### _log_message_link()
+
+```python
+await topics._log_message_link(
+    *,
+    user_id: int,
+    source_chat_id: int,
+    source_message_id: int,
+    target_chat_id: int,
+    target_message_id: int
+) -> None
+```
+
+Logs a bidirectional message link in a transaction. Creates two links:
+1. Source → Target
+2. Target → Source
+
+This enables reply threading in both directions.
+
+**Example:**
+```python
+# From topic_manager.py:202-218
+async with self._db.transaction():
+    await self._db.log_message_link(
+        user_id=user_id,
+        source_chat_id=source_chat_id,
+        source_message_id=source_message_id,
+        target_chat_id=target_chat_id,
+        target_message_id=target_message_id,
+        commit=False,
+    )
+    await self._db.log_message_link(
+        user_id=user_id,
+        source_chat_id=target_chat_id,
+        source_message_id=target_message_id,
+        target_chat_id=source_chat_id,
+        target_message_id=source_message_id,
+        commit=False,
+    )
+```
+
+### _extract_message_id()
+
+```python
+@staticmethod
+TopicManager._extract_message_id(result: object) -> int
+```
+
+Extracts the message ID from `bot.copy_message()` result, handling both `MessageId` objects and raw integers.
+
+---
+
+## Data Models
+
+### TopicRef
+
+```python
+@dataclass(frozen=True)
+class TopicRef:
+    user_id: int
+    topic_id: int
+```
+
+Represents a reference to a user's forum topic.
+
+<ParamField path="user_id" type="int">
+  Telegram user ID
+</ParamField>
+
+<ParamField path="topic_id" type="int">
+  Forum topic (message thread) ID in the operator group
+</ParamField>
+
+**Example:**
+```python
+topic = TopicRef(user_id=123456789, topic_id=456)
+print(f"User {topic.user_id} has topic {topic.topic_id}")
+```
+
+---
+
+## Helper Functions
+
+These internal helper functions support the TopicManager's functionality.
+
+### _topic_name()
+
+```python
+_topic_name(user: User) -> str
+```
+
+Generates a forum topic name from a user's profile:
+- Format: `"Full Name (@username) [user_id]"`
+- Truncated to 128 characters (Telegram's limit)
+- Falls back to "User" if no name is available
+
+**Example:**
+```python
+user = User(id=123, first_name="Alice", last_name="Smith", username="alice")
+name = _topic_name(user)
+# Returns: "Alice Smith (@alice) [123]"
+```
+
+### _is_thread_missing()
+
+```python
+_is_thread_missing(err: TelegramBadRequest) -> bool
+```
+
+Detects if a `TelegramBadRequest` error indicates a missing or closed forum topic.
+
+**Detected error messages:**
+- "message thread not found"
+- "message thread is not found"
+- "thread not found"
+- "topic" + "closed"
+
+### _message_has_links()
+
+```python
+_message_has_links(message: Message) -> bool
+```
+
+Checks if a message contains URLs or text links. Used to determine if link preview should be disabled when falling back from `copy_message()` to `send_message()`.
+
+**Detection:**
+- Checks for `url` and `text_link` entities
+- Searches text for `http://`, `https://`, `t.me/`, `www.`

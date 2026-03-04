@@ -1,0 +1,300 @@
+---
+title: Configuration
+description: Application configuration and environment variables
+---
+
+The bot's configuration is managed through the `Config` dataclass and loaded from environment variables using the `load_config()` function.
+
+## Config Dataclass
+
+```python
+@dataclass(frozen=True)
+class Config:
+    bot_token: str
+    operator_group_id: int
+    db_path: str
+    log_level: str = "INFO"
+    log_messages: bool = True
+```
+
+Immutable configuration object containing all bot settings.
+
+### Fields
+
+<ParamField path="bot_token" type="str" required>
+  Telegram Bot API token obtained from @BotFather
+</ParamField>
+
+<ParamField path="operator_group_id" type="int" required>
+  Telegram chat ID of the operator group. Must be a supergroup with forum topics enabled. Usually a negative number (e.g., `-1001234567890`)
+</ParamField>
+
+<ParamField path="db_path" type="str" default="./support_bot.sqlite3">
+  Path to the SQLite database file. Created automatically if it doesn't exist
+</ParamField>
+
+<ParamField path="log_level" type="str" default="INFO">
+  Python logging level. Valid values: `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`
+</ParamField>
+
+<ParamField path="log_messages" type="bool" default="True">
+  Whether to log messages to the database. Set to `False` to disable message logging while keeping conversation mappings active
+</ParamField>
+
+**Example:**
+```python
+config = Config(
+    bot_token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+    operator_group_id=-1001234567890,
+    db_path="./data/bot.sqlite3",
+    log_level="DEBUG",
+    log_messages=True
+)
+```
+
+---
+
+## load_config()
+
+```python
+load_config() -> Config
+```
+
+Loads configuration from environment variables and returns a `Config` instance.
+
+**Raises:**
+- `RuntimeError`: If required environment variables are missing or invalid
+
+**Example:**
+```python
+from support_bot.config import load_config
+
+config = load_config()
+print(f"Bot token: {config.bot_token}")
+print(f"Operator group: {config.operator_group_id}")
+```
+
+---
+
+## Environment Variables
+
+### BOT_TOKEN
+
+**Required:** Yes
+
+**Type:** String
+
+**Description:** Telegram Bot API token obtained from [@BotFather](https://t.me/botfather).
+
+**Example:**
+```bash
+export BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+```
+
+**Validation:**
+```python
+bot_token = os.getenv("BOT_TOKEN")
+if not bot_token:
+    raise RuntimeError("Missing BOT_TOKEN env var")
+```
+
+---
+
+### OPERATOR_GROUP_ID
+
+**Required:** Yes
+
+**Type:** Integer
+
+**Description:** Telegram chat ID of the operator supergroup. The group must have forum topics enabled. Usually negative (e.g., `-1001234567890`).
+
+**How to get the group ID:**
+1. Add the bot to your supergroup
+2. Enable forum topics in group settings
+3. Use a tool like [@getidsbot](https://t.me/getidsbot) or check the bot's logs
+4. The ID will be a large negative number
+
+**Example:**
+```bash
+export OPERATOR_GROUP_ID="-1001234567890"
+```
+
+**Validation:**
+```python
+operator_group_id_raw = os.getenv("OPERATOR_GROUP_ID")
+if not operator_group_id_raw:
+    raise RuntimeError("Missing OPERATOR_GROUP_ID env var")
+
+try:
+    operator_group_id = int(operator_group_id_raw)
+except ValueError as exc:
+    raise RuntimeError("OPERATOR_GROUP_ID must be an integer") from exc
+```
+
+---
+
+### DB_PATH
+
+**Required:** No
+
+**Type:** String
+
+**Default:** `"./support_bot.sqlite3"`
+
+**Description:** Path to the SQLite database file. The file is created automatically if it doesn't exist. Parent directories must exist.
+
+**Example:**
+```bash
+export DB_PATH="/var/lib/telegram-bot/bot.sqlite3"
+```
+
+**Loading:**
+```python
+db_path = os.getenv("DB_PATH", "./support_bot.sqlite3")
+```
+
+---
+
+### LOG_LEVEL
+
+**Required:** No
+
+**Type:** String
+
+**Default:** `"INFO"`
+
+**Description:** Python logging level. Controls the verbosity of console output.
+
+**Valid values:**
+- `DEBUG`: Detailed information for debugging
+- `INFO`: General informational messages (default)
+- `WARNING`: Warning messages only
+- `ERROR`: Error messages only
+- `CRITICAL`: Critical errors only
+
+**Example:**
+```bash
+export LOG_LEVEL="DEBUG"
+```
+
+**Loading:**
+```python
+log_level = os.getenv("LOG_LEVEL", "INFO")
+```
+
+---
+
+### LOG_MESSAGES
+
+**Required:** No
+
+**Type:** Boolean (string "0" or "1")
+
+**Default:** `True` ("1")
+
+**Description:** Whether to log messages to the database. Conversation mappings are always maintained, but message content logging can be disabled for privacy or performance.
+
+**Values:**
+- `"1"` or any non-zero string: Enable message logging (default)
+- `"0"`: Disable message logging
+
+**Example:**
+```bash
+# Enable logging (default)
+export LOG_MESSAGES="1"
+
+# Disable logging
+export LOG_MESSAGES="0"
+```
+
+**Loading:**
+```python
+log_messages = os.getenv("LOG_MESSAGES", "1") != "0"
+```
+
+---
+
+## Complete Example
+
+### .env File
+
+```bash
+BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+OPERATOR_GROUP_ID="-1001234567890"
+DB_PATH="./data/support_bot.sqlite3"
+LOG_LEVEL="INFO"
+LOG_MESSAGES="1"
+```
+
+### Usage in Application
+
+```python
+from support_bot.config import load_config
+from support_bot.db import Database
+from support_bot.topic_manager import TopicManager
+from aiogram import Bot
+
+# Load configuration
+config = load_config()
+
+# Initialize components
+bot = Bot(token=config.bot_token)
+db = Database(config.db_path)
+topics = TopicManager(db, config.operator_group_id)
+
+# Use configuration
+if config.log_messages:
+    print("Message logging is enabled")
+```
+
+---
+
+## Configuration Validation
+
+The `load_config()` function performs validation:
+
+1. **Missing required variables**: Raises `RuntimeError` if `BOT_TOKEN` or `OPERATOR_GROUP_ID` are not set
+2. **Type validation**: Ensures `OPERATOR_GROUP_ID` is a valid integer
+3. **Default values**: Applies defaults for optional variables
+
+**Error messages:**
+
+```python
+# Missing BOT_TOKEN
+RuntimeError: Missing BOT_TOKEN env var
+
+# Missing OPERATOR_GROUP_ID
+RuntimeError: Missing OPERATOR_GROUP_ID env var
+
+# Invalid OPERATOR_GROUP_ID
+RuntimeError: OPERATOR_GROUP_ID must be an integer
+```
+
+**Example validation code:**
+```python
+def load_config() -> Config:
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        raise RuntimeError("Missing BOT_TOKEN env var")
+
+    operator_group_id_raw = os.getenv("OPERATOR_GROUP_ID")
+    if not operator_group_id_raw:
+        raise RuntimeError("Missing OPERATOR_GROUP_ID env var")
+
+    try:
+        operator_group_id = int(operator_group_id_raw)
+    except ValueError as exc:
+        raise RuntimeError("OPERATOR_GROUP_ID must be an integer") from exc
+
+    db_path = os.getenv("DB_PATH", "./support_bot.sqlite3")
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    log_messages = os.getenv("LOG_MESSAGES", "1") != "0"
+
+    return Config(
+        bot_token=bot_token,
+        operator_group_id=operator_group_id,
+        db_path=db_path,
+        log_level=log_level,
+        log_messages=log_messages,
+    )
+```

@@ -1,0 +1,133 @@
+---
+title: Installation
+description: Step-by-step guide to install the Telegram Support Bot
+---
+
+This guide walks you through installing the Telegram Support Bot on your system.
+
+## Prerequisites
+
+Before you begin, ensure you have the following:
+
+<CardGroup cols={2}>
+  <Card title="Python 3.10+" icon="python">
+    Python 3.11 or higher is recommended for optimal performance
+  </Card>
+  <Card title="pip" icon="box">
+    Python package manager (usually included with Python)
+  </Card>
+</CardGroup>
+
+<Note>
+  The bot is built with **aiogram 3**, which requires Python 3.10 or higher. Python 3.11+ is recommended for better performance and feature support.
+</Note>
+
+## Installation steps
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the bot repository to your local machine:
+    
+    ```bash
+    git clone <repository-url>
+    cd telegram-support-bot
+    ```
+  </Step>
+
+  <Step title="Create a virtual environment">
+    Create and activate a Python virtual environment to isolate dependencies:
+    
+    <CodeGroup>
+    ```bash Linux/macOS
+    python -m venv .venv
+    source .venv/bin/activate
+    ```
+    
+    ```bash Windows (Command Prompt)
+    python -m venv .venv
+    .venv\Scripts\activate.bat
+    ```
+    
+    ```bash Windows (PowerShell)
+    python -m venv .venv
+    .venv\Scripts\Activate.ps1
+    ```
+    </CodeGroup>
+    
+    <Note>
+      Using a virtual environment ensures dependencies don't conflict with other Python projects on your system.
+    </Note>
+  </Step>
+
+  <Step title="Install dependencies">
+    Install the required Python packages from `requirements.txt`:
+    
+    ```bash
+    pip install -r requirements.txt
+    ```
+    
+    This installs the following core dependencies:
+    
+    ```txt requirements.txt
+    aiogram==3.13.1
+    aiosqlite==0.20.0
+    python-dotenv==1.0.1
+    ```
+    
+    <Accordion title="Dependency overview">
+      - **aiogram 3.13.1** - Modern and asynchronous Telegram Bot API framework
+      - **aiosqlite 0.20.0** - Async SQLite database driver for storing routing and message history
+      - **python-dotenv 1.0.1** - Loads environment variables from `.env` file
+    </Accordion>
+  </Step>
+
+  <Step title="Verify installation">
+    Verify that all packages are installed correctly:
+    
+    ```bash
+    python -c "import aiogram; import aiosqlite; print('Installation successful!')"
+    ```
+    
+    You should see `Installation successful!` if everything is installed properly.
+  </Step>
+</Steps>
+
+## Directory structure
+
+After installation, your project directory will have the following structure:
+
+```
+telegram-support-bot/
+├── support_bot/              # Main bot package
+│   ├── __init__.py
+│   ├── __main__.py          # Entry point for running the bot
+│   ├── config.py            # Configuration loader
+│   ├── db.py                # Database operations
+│   ├── main.py              # Bot initialization and startup
+│   ├── topic_manager.py     # Forum topic management
+│   ├── telegram_utils.py    # Telegram utility functions
+│   └── handlers/            # Message handlers
+│       ├── __init__.py
+│       ├── user.py          # User message handlers
+│       └── operator.py      # Operator message handlers
+├── .env                     # Environment configuration (create this)
+├── .env.example             # Example environment variables
+├── requirements.txt         # Python dependencies
+└── support_bot.sqlite3      # SQLite database (created automatically)
+```
+
+<Note>
+  The `support_bot.sqlite3` database file will be created automatically when you first run the bot. You can configure its location using the `DB_PATH` environment variable.
+</Note>
+
+## Next steps
+
+After installation, you need to:
+
+1. [Configure environment variables](/setup/configuration) - Set up your bot token and operator group
+2. [Set up Telegram](/setup/telegram-setup) - Create your bot and configure the operator group
+3. [Run the bot](/quickstart) - Start processing support messages
+
+<Warning>
+  Don't forget to configure your `.env` file before running the bot. The bot will not start without required environment variables like `BOT_TOKEN` and `OPERATOR_GROUP_ID`.
+</Warning>

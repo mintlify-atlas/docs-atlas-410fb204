@@ -1,0 +1,415 @@
+---
+title: Message flow
+description: How messages are routed between users and operators
+---
+
+The support bot routes messages bidirectionally between users and operators while preserving reply chains and handling edge cases. This page explains the complete message flow.
+
+## User to operator flow
+
+When a user sends a message to the bot, it follows this path:
+
+### 1. Message received
+
+The user router catches all private messages:
+
+```python support_bot/handlers/user.py
+@router.message(F.chat.type == "private")
+async def any_private_message(
+    message: Message, bot: Bot, db: Database, topics: TopicManager, log_messages: bool = True
+) -> None:
+    if message.from_user is None:
+        return
+    
+    await _log_user_message(db, message, log_messages=log_messages)
+    await topics.copy_user_message_to_topic(bot, message)
+```
+
+### 2. Topic ensured
+
+The TopicManager checks if the user has an active conversation and creates a topic if needed:
+
+```python support_bot/topic_manager.py
+async def ensure_topic(self, bot: Bot, user: User) -> TopicRef:
+    lock = await self._lock_for(user.id)
+    async with lock:
+        existing = await self._db.get_active_conversation(user.id)
+        if existing:
+            return TopicRef(user_id=user.id, topic_id=existing.topic_id)
+        
+        topic = await bot.create_forum_topic(
+            chat_id=self._operator_group_id,
+            name=_topic_name(user),
+        )
+        await self._db.set_conversation(user_id=user.id, topic_id=topic.message_thread_id, active=True)
+        
+        username_line = f"@{user.username}" if user.username else "—"
+        await bot.send_message(
+            chat_id=self._operator_group_id,
+            message_thread_id=topic.message_thread_id,
+            text=(
+                "New conversation.\n"
+                f"User: {user.full_name}\n"
+                f"ID: <code>{user.id}</code>\n"
+                f"Username: {username_line}"
+            ),
+        )
+        
+        return TopicRef(user_id=user.id, topic_id=topic.message_thread_id)
+```
+
+<Note>
+The topic is created with a user lock to prevent race conditions if the user sends multiple messages simultaneously.
+</Note>
+
+### 3. Message copied
+
+The message is copied to the operator group topic:
+
+```python support_bot/topic_manager.py
+copy_result = await bot.copy_message(
+    chat_id=self._operator_group_id,
+    from_chat_id=message.chat.id,
+    message_id=message.message_id,
+    message_thread_id=topic.topic_id,
+    reply_parameters=reply_params,
+)
+```
+
+### 4. Link logged
+
+Bidirectional message links are stored for reply handling:
+
+```python support_bot/topic_manager.py
+await self._log_message_link(
+    user_id=message.from_user.id,
+    source_chat_id=message.chat.id,
+    source_message_id=message.message_id,
+    target_chat_id=self._operator_group_id,
+    target_message_id=self._extract_message_id(copy_result),
+)
+```
+
+The `_log_message_link` method stores both directions:
+
+```python support_bot/topic_manager.py
+async def _log_message_link(self, *, user_id: int, source_chat_id: int, 
+                           source_message_id: int, target_chat_id: int,
+                           target_message_id: int) -> None:
+    async with self._db.transaction():
+        await self._db.log_message_link(
+            user_id=user_id,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            target_chat_id=target_chat_id,
+            target_message_id=target_message_id,
+            commit=False,
+        )
+        await self._db.log_message_link(
+            user_id=user_id,
+            source_chat_id=target_chat_id,
+            source_message_id=target_message_id,
+            target_chat_id=source_chat_id,
+            target_message_id=source_message_id,
+            commit=False,
+        )
+```
+
+## Operator to user flow
+
+When an operator replies in a topic, the message is routed back to the user:
+
+### 1. Topic message received
+
+The operator router catches all topic messages in the operator group:
+
+```python support_bot/handlers/operator.py
+@router.message(F.is_topic_message.is_(True))
+async def topic_message_to_user(message: Message, bot: Bot, db: Database, log_messages: bool = True) -> None:
+    if message.from_user is None:
+        return
+    if message.from_user.is_bot:
+        return
+    
+    if message.message_thread_id is None:
+        return
+    
+    user_id = await db.find_user_id_by_topic(int(message.message_thread_id))
+    if user_id is None:
+        return
+```
+
+<Note>
+Bot messages are ignored to prevent the bot from forwarding its own messages.
+</Note>
+
+### 2. User lookup
+
+The handler queries the database to find which user owns the topic:
+
+```python support_bot/db.py
+async def find_user_id_by_topic(self, topic_id: int) -> int | None:
+    cur = await self.conn.execute(
+        "SELECT user_id FROM conversations WHERE topic_id = ? AND active = 1",
+        (topic_id,),
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    return int(row[0]) if row else None
+```
+
+### 3. Message copied
+
+The message is copied to the user's private chat:
+
+```python support_bot/handlers/operator.py
+try:
+    copy_result = await bot.copy_message(
+        chat_id=user_id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        reply_parameters=reply_params,
+    )
+except TelegramForbiddenError:
+    await message.reply(
+        "The user has blocked the bot or has not opened the chat with the bot."
+    )
+    return
+except TelegramBadRequest as err:
+    await message.reply(
+        f"Failed to send to the user: {getattr(err, 'message', str(err))}"
+    )
+    return
+```
+
+### 4. Links logged
+
+Bidirectional message links are stored in a transaction:
+
+```python support_bot/handlers/operator.py
+async with db.transaction():
+    await db.log_message_link(
+        user_id=user_id,
+        source_chat_id=message.chat.id,
+        source_message_id=message.message_id,
+        target_chat_id=user_id,
+        target_message_id=int(copied_message_id),
+        commit=False,
+    )
+    await db.log_message_link(
+        user_id=user_id,
+        source_chat_id=user_id,
+        source_message_id=int(copied_message_id),
+        target_chat_id=message.chat.id,
+        target_message_id=message.message_id,
+        commit=False,
+    )
+```
+
+## Reply handling
+
+The bot preserves reply chains across both sides of the conversation.
+
+### Building reply parameters
+
+When copying a message, the system checks if it's a reply:
+
+```python support_bot/topic_manager.py
+async def _build_reply_params(
+    self,
+    *,
+    source_chat_id: int,
+    source_message: Message | None,
+    target_chat_id: int,
+) -> ReplyParameters | None:
+    if source_message is None:
+        return None
+    target_message_id = await self._db.find_linked_message_id(
+        source_chat_id=source_chat_id,
+        source_message_id=source_message.message_id,
+        target_chat_id=target_chat_id,
+    )
+    if target_message_id is None:
+        return None
+    return ReplyParameters(
+        message_id=target_message_id,
+        allow_sending_without_reply=True,
+    )
+```
+
+### Looking up linked messages
+
+The database finds the corresponding message ID in the target chat:
+
+```python support_bot/db.py
+async def find_linked_message_id(
+    self,
+    *,
+    source_chat_id: int,
+    source_message_id: int,
+    target_chat_id: int | None = None,
+) -> int | None:
+    if target_chat_id is None:
+        cur = await self.conn.execute(
+            """
+            SELECT target_message_id
+              FROM message_links
+             WHERE source_chat_id = ? AND source_message_id = ?
+            """,
+            (source_chat_id, source_message_id),
+        )
+    else:
+        cur = await self.conn.execute(
+            """
+            SELECT target_message_id
+              FROM message_links
+             WHERE source_chat_id = ? AND source_message_id = ? AND target_chat_id = ?
+            """,
+            (source_chat_id, source_message_id, target_chat_id),
+        )
+    row = await cur.fetchone()
+    await cur.close()
+    return int(row[0]) if row else None
+```
+
+### Example flow
+
+1. User sends message A → Topic receives message B (link stored: A↔B)
+2. Operator replies to B → User receives reply C (link stored: B↔C)
+3. User replies to C → Topic receives reply D with reference to B
+4. The reply chain is preserved on both sides
+
+<Note>
+If a linked message isn't found, `allow_sending_without_reply=True` ensures the message is still sent without the reply reference.
+</Note>
+
+## Error handling
+
+The bot gracefully handles various error conditions:
+
+### Blocked users
+
+When a user blocks the bot:
+
+```python support_bot/handlers/operator.py
+except TelegramForbiddenError:
+    await message.reply(
+        "The user has blocked the bot or has not opened the chat with the bot."
+    )
+    return
+```
+
+The operator receives immediate feedback that the message couldn't be delivered.
+
+### Missing or closed topics
+
+When a topic is deleted or closed:
+
+```python support_bot/topic_manager.py
+def _is_thread_missing(err: TelegramBadRequest) -> bool:
+    msg = (getattr(err, "message", None) or "").lower()
+    return (
+        "message thread not found" in msg
+        or "message thread is not found" in msg
+        or "thread not found" in msg
+        or ("topic" in msg and "closed" in msg)
+    )
+```
+
+If a topic is missing, the system automatically creates a new one:
+
+```python support_bot/topic_manager.py
+except TelegramBadRequest as err:
+    if not _is_thread_missing(err):
+        # Report other errors to operators
+        try:
+            await bot.send_message(
+                chat_id=self._operator_group_id,
+                message_thread_id=topic.topic_id,
+                text=(
+                    "Failed to copy the user's message.\n"
+                    f"type={message.content_type}, message_id={message.message_id}\n"
+                    f"error={getattr(err, 'message', str(err))}"
+                ),
+            )
+        except Exception:
+            pass
+        return topic
+    
+    # Topic is missing - create a new one
+    await self._db.deactivate_conversation(message.from_user.id)
+    topic = await self.ensure_topic(bot, message.from_user)
+    reply_params = None  # Can't preserve replies across topics
+    copy_result = await bot.copy_message(
+        chat_id=self._operator_group_id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        message_thread_id=topic.topic_id,
+        reply_parameters=reply_params,
+    )
+```
+
+<Warning>
+When a topic is recreated, reply chains cannot be preserved because the old messages are gone.
+</Warning>
+
+### Link preview issues
+
+Some messages with links fail to copy due to Telegram restrictions:
+
+```python support_bot/topic_manager.py
+except TelegramForbiddenError:
+    if message.content_type == "text" and _message_has_links(message):
+        try:
+            sent = await bot.send_message(
+                chat_id=self._operator_group_id,
+                message_thread_id=topic.topic_id,
+                text=message.text or "",
+                entities=message.entities,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+                reply_parameters=reply_params,
+            )
+```
+
+The bot attempts to resend as plain text with link previews disabled.
+
+### Helper function for link detection
+
+```python support_bot/topic_manager.py
+def _message_has_links(message: Message) -> bool:
+    entities = message.entities or ()
+    for entity in entities:
+        if entity.type in ("url", "text_link"):
+            return True
+    text = message.text or ""
+    return "http://" in text or "https://" in text or "t.me/" in text or "www." in text
+```
+
+## Message logging
+
+When `LOG_MESSAGES=1`, all messages are stored in the database:
+
+```python support_bot/handlers/user.py
+async def _log_user_message(db: Database, message: Message, *, log_messages: bool) -> None:
+    if message.from_user is None:
+        return
+    if not log_messages:
+        return
+    
+    await db.log_user_message(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        direction="user",
+        chat_id=message.chat.id,
+        message_id=message.message_id,
+        content_type=message.content_type,
+        text=message.text,
+        caption=message.caption,
+        file_id=extract_file_id(message),
+        payload_json=safe_payload_json(message),
+    )
+```
+
+This provides a complete audit trail of all conversations. See [Database design](/concepts/database) for schema details.

@@ -1,0 +1,300 @@
+---
+title: Configuration
+description: Complete guide to configuring environment variables for the Telegram Support Bot
+---
+
+The bot uses environment variables loaded from a `.env` file to configure its behavior. This guide explains each configuration option and how it's used in the code.
+
+## Creating your configuration file
+
+<Steps>
+  <Step title="Copy the example file">
+    Create your `.env` file from the provided template:
+    
+    ```bash
+    cp .env.example .env
+    ```
+  </Step>
+
+  <Step title="Edit the configuration">
+    Open `.env` in your text editor and configure the required variables:
+    
+    ```bash .env.example
+    BOT_TOKEN=123456:ABCDEF_your_token_here
+    # Supergroup chat id (usually starts with -100...)
+    OPERATOR_GROUP_ID=-1001234567890
+    # Path to SQLite DB file
+    DB_PATH=./support_bot.sqlite3
+    LOG_LEVEL=INFO
+    # Store messages history in SQLite (set to 0 to disable)
+    LOG_MESSAGES=1
+    ```
+  </Step>
+</Steps>
+
+## Configuration variables
+
+### BOT_TOKEN (required)
+
+<ParamField path="BOT_TOKEN" type="string" required>
+  Your Telegram bot token obtained from [@BotFather](https://t.me/BotFather)
+</ParamField>
+
+**Format:** `<bot_id>:<token>` (e.g., `123456:ABCDEF_your_token_here`)
+
+**How it's used:**
+
+The bot token is loaded and validated in `config.py:17-19`:
+
+```python support_bot/config.py
+bot_token = os.getenv("BOT_TOKEN")
+if not bot_token:
+    raise RuntimeError("Missing BOT_TOKEN env var")
+```
+
+The token is then used to initialize the Bot instance in `main.py:33-36`:
+
+```python support_bot/main.py
+bot = Bot(
+    token=config.bot_token,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+```
+
+<Warning>
+  Never commit your `.env` file or share your bot token publicly. Anyone with your token can control your bot.
+</Warning>
+
+### OPERATOR_GROUP_ID (required)
+
+<ParamField path="OPERATOR_GROUP_ID" type="integer" required>
+  The chat ID of your operator supergroup (must have Forum/Topics enabled)
+</ParamField>
+
+**Format:** Negative integer starting with `-100` (e.g., `-1001234567890`)
+
+**How it's used:**
+
+The operator group ID is validated and parsed in `config.py:21-28`:
+
+```python support_bot/config.py
+operator_group_id_raw = os.getenv("OPERATOR_GROUP_ID")
+if not operator_group_id_raw:
+    raise RuntimeError("Missing OPERATOR_GROUP_ID env var")
+
+try:
+    operator_group_id = int(operator_group_id_raw)
+except ValueError as exc:
+    raise RuntimeError("OPERATOR_GROUP_ID must be an integer") from exc
+```
+
+The group ID is used to:
+- Initialize the TopicManager in `main.py:39`
+- Filter operator messages in `main.py:47`
+
+```python support_bot/main.py
+topics = TopicManager(db=db, operator_group_id=config.operator_group_id)
+
+# Filter messages only from the operator group
+operator_router.message.filter(F.chat.id == config.operator_group_id)
+```
+
+<Note>
+  The group ID must be from a **supergroup** with **Forum/Topics enabled**. Regular groups won't work. See [Telegram Setup](/setup/telegram-setup) for instructions.
+</Note>
+
+### DB_PATH (optional)
+
+<ParamField path="DB_PATH" type="string" default="./support_bot.sqlite3">
+  Path to the SQLite database file for storing routing and message history
+</ParamField>
+
+**Format:** File path (relative or absolute)
+
+**How it's used:**
+
+The database path defaults to `./support_bot.sqlite3` if not specified (`config.py:30`):
+
+```python support_bot/config.py
+db_path = os.getenv("DB_PATH", "./support_bot.sqlite3")
+```
+
+The database is initialized in `main.py:29-31`:
+
+```python support_bot/main.py
+db = Database(config.db_path)
+await db.connect()
+await db.init()
+```
+
+**What's stored:**
+- User-to-topic routing information
+- Reply mappings between user messages and operator replies
+- Optional message history (if `LOG_MESSAGES=1`)
+
+<Tip>
+  You can use different database paths for development and production environments. For example:
+  - Development: `DB_PATH=./dev_support.sqlite3`
+  - Production: `DB_PATH=/var/lib/support_bot/production.sqlite3`
+</Tip>
+
+### LOG_LEVEL (optional)
+
+<ParamField path="LOG_LEVEL" type="string" default="INFO">
+  Logging level for the bot's output
+</ParamField>
+
+**Valid values:** `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
+
+**How it's used:**
+
+The log level is configured in `config.py:31` and applied in `main.py:23`:
+
+```python support_bot/config.py
+log_level = os.getenv("LOG_LEVEL", "INFO")
+```
+
+```python support_bot/main.py
+logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
+log = logging.getLogger("support_bot")
+```
+
+**Recommended settings:**
+- **DEBUG** - Detailed information for troubleshooting (verbose)
+- **INFO** - General operational information (recommended for production)
+- **WARNING** - Only warnings and errors
+- **ERROR** - Only errors and critical issues
+
+### LOG_MESSAGES (optional)
+
+<ParamField path="LOG_MESSAGES" type="boolean" default="1">
+  Whether to store message history in the SQLite database
+</ParamField>
+
+**Format:** `1` to enable, `0` to disable
+
+**How it's used:**
+
+The setting is parsed in `config.py:32` and passed to the dispatcher in `main.py:43`:
+
+```python support_bot/config.py
+log_messages = os.getenv("LOG_MESSAGES", "1") != "0"
+```
+
+```python support_bot/main.py
+dp["log_messages"] = config.log_messages
+```
+
+**Behavior:**
+- `LOG_MESSAGES=1` - All messages are stored in SQLite for history tracking
+- `LOG_MESSAGES=0` - Only routing and reply mappings are stored (minimal storage)
+
+<Warning>
+  Disabling message logging (`LOG_MESSAGES=0`) reduces database size but you'll lose message history. You won't be able to retrieve past conversations.
+</Warning>
+
+## Configuration validation
+
+The bot validates configuration on startup. If validation fails, you'll see one of these errors:
+
+<AccordionGroup>
+  <Accordion title="Missing BOT_TOKEN env var">
+    **Cause:** The `BOT_TOKEN` variable is not set in your `.env` file.
+    
+    **Solution:** Add your bot token from @BotFather:
+    ```bash
+    BOT_TOKEN=123456:ABCDEF_your_token_here
+    ```
+  </Accordion>
+
+  <Accordion title="Missing OPERATOR_GROUP_ID env var">
+    **Cause:** The `OPERATOR_GROUP_ID` variable is not set in your `.env` file.
+    
+    **Solution:** Add your operator group ID:
+    ```bash
+    OPERATOR_GROUP_ID=-1001234567890
+    ```
+    
+    See [Getting the group ID](/setup/telegram-setup#get-the-group-id) for instructions.
+  </Accordion>
+
+  <Accordion title="OPERATOR_GROUP_ID must be an integer">
+    **Cause:** The group ID contains non-numeric characters or is incorrectly formatted.
+    
+    **Solution:** Ensure the group ID is a valid negative integer:
+    ```bash
+    # Correct
+    OPERATOR_GROUP_ID=-1001234567890
+    
+    # Incorrect
+    OPERATOR_GROUP_ID="-1001234567890"  # Remove quotes
+    OPERATOR_GROUP_ID=-100abc123        # No letters allowed
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Complete example
+
+Here's a complete `.env` configuration example:
+
+<CodeGroup>
+```bash Production
+# Production bot with message logging enabled
+BOT_TOKEN=987654321:ABCDEFghijklmnopQRSTUVwxyz123456789
+OPERATOR_GROUP_ID=-1001234567890
+DB_PATH=/var/lib/support_bot/production.sqlite3
+LOG_LEVEL=INFO
+LOG_MESSAGES=1
+```
+
+```bash Development
+# Development bot with debug logging
+BOT_TOKEN=123456789:ABCDEFtest_token_for_development
+OPERATOR_GROUP_ID=-1009876543210
+DB_PATH=./dev_support.sqlite3
+LOG_LEVEL=DEBUG
+LOG_MESSAGES=1
+```
+
+```bash Minimal (No History)
+# Minimal setup without message history
+BOT_TOKEN=123456:ABCDEF_your_token_here
+OPERATOR_GROUP_ID=-1001234567890
+DB_PATH=./support_bot.sqlite3
+LOG_LEVEL=WARNING
+LOG_MESSAGES=0
+```
+</CodeGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Bot doesn't start after configuration">
+    1. Check that your `.env` file is in the same directory as `support_bot/`
+    2. Verify all required variables (`BOT_TOKEN`, `OPERATOR_GROUP_ID`) are set
+    3. Ensure there are no extra spaces or quotes around values
+    4. Run with `LOG_LEVEL=DEBUG` to see detailed error messages
+  </Accordion>
+
+  <Accordion title="Database connection errors">
+    1. Check that the directory for `DB_PATH` exists
+    2. Ensure you have write permissions in the database directory
+    3. Try using an absolute path instead of a relative path
+    4. Verify the database file isn't locked by another process
+  </Accordion>
+
+  <Accordion title="Bot can't access operator group">
+    1. Verify the `OPERATOR_GROUP_ID` is correct (should start with `-100`)
+    2. Ensure the bot is added to the operator group as an administrator
+    3. Check that the bot has "Manage Topics" permission
+    4. Confirm the group has Forum/Topics enabled
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+After configuring your environment variables:
+
+1. [Set up your Telegram bot and operator group](/setup/telegram-setup)
+2. [Run the bot and test your setup](/quickstart)
+3. [Learn about message routing](/concepts/message-flow)
