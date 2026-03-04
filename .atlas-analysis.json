@@ -1,0 +1,75 @@
+{
+  "projectType": "general",
+  "projectName": "Telegram Support Bot",
+  "projectDescription": "Open-source Telegram support bot that creates a separate forum topic for each user, enabling operators to manage customer conversations efficiently.",
+  "theme": "almond",
+  "primaryColor": "#0088cc",
+  "lightColor": "#54a9eb",
+  "darkColor": "#006ba6",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get Started",
+        "pages": [
+          "introduction",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Setup & Configuration",
+        "pages": [
+          "setup/installation",
+          "setup/configuration",
+          "setup/telegram-setup"
+        ]
+      },
+      {
+        "group": "Core Concepts",
+        "pages": [
+          "concepts/architecture",
+          "concepts/message-flow",
+          "concepts/topic-management",
+          "concepts/database"
+        ]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          "guides/deployment",
+          "guides/customization",
+          "guides/troubleshooting"
+        ]
+      },
+      {
+        "group": "API Reference",
+        "pages": [
+          "api/database",
+          "api/topic-manager",
+          "api/handlers",
+          "api/configuration"
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "One forum topic per user for organized support",
+    "Bidirectional message forwarding between users and operators",
+    "Reply mirroring with message linking",
+    "Automatic topic creation and management",
+    "SQLite-based routing and message history",
+    "Built with aiogram 3 for modern async Python"
+  ],
+  "publicApiSurface": [
+    "Database.connect()",
+    "Database.get_active_conversation(user_id)",
+    "Database.set_conversation(user_id, topic_id, active)",
+    "Database.log_message()",
+    "Database.log_message_link()",
+    "TopicManager.ensure_topic(bot, user)",
+    "TopicManager.copy_user_message_to_topic(bot, message)",
+    "Config.bot_token",
+    "Config.operator_group_id",
+    "Config.db_path",
+    "Config.log_messages"
+  ]
+}
